@@ -1,0 +1,18 @@
+# Secrets & Local Environment
+.env
+set_env.bat
+
+# Runtime Account Sessions & State (never commit raw sessions!)
+data/
+*.session
+*.session-journal
+
+# Python Bytecode & Virtual Environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
