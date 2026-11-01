@@ -1,6 +1,6 @@
 """
-Telegram Bot API notification & command handler for TelegPixel (@PixellinnoBobmbardinnoBOT).
-Sends rich per-account coin reports modeled after ThundrCoin.
+Telegram Bot API notification & command handler for TelegPixel (@pixelfarmik143714bot).
+Sends rich per-account coin reports modeled after ThundrCoin with anti-flag protections.
 """
 
 from __future__ import annotations
@@ -26,6 +26,11 @@ logger = logging.getLogger("telegpixel.notifier")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BOT_STATE_FILE = PROJECT_ROOT / "data" / "telegram_bot_state.json"
+
+STANDARD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 def _coin_word_ru(n: int) -> str:
@@ -72,6 +77,9 @@ class TelegramNotifier:
         except Exception:
             self.tz = timezone.utc
 
+        self._last_send_ts = 0.0
+        self.min_send_interval = 2.0
+
     def _load_bot_state(self) -> Dict[str, Any]:
         if self.state_file.exists():
             try:
@@ -105,10 +113,13 @@ class TelegramNotifier:
             return self.chat_id
         if not self.bot_token:
             return None
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            return None
         try:
             resp = requests.get(
                 f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
-                params={"timeout": 2},
+                params={"timeout": 0},
+                headers={"User-Agent": STANDARD_USER_AGENT},
                 timeout=8,
             )
             data = resp.json()
@@ -269,6 +280,12 @@ class TelegramNotifier:
             logger.warning("TELEGRAM_CHAT_ID не задан и не найден через getUpdates — напишите /start боту.")
             return False
 
+        is_testing = bool(os.getenv("PYTEST_CURRENT_TEST"))
+        if not is_testing:
+            elapsed = time.time() - getattr(self, "_last_send_ts", 0.0)
+            if elapsed < self.min_send_interval:
+                time.sleep(self.min_send_interval - elapsed)
+
         try:
             resp = requests.post(
                 f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
@@ -278,13 +295,19 @@ class TelegramNotifier:
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 },
+                headers={"User-Agent": STANDARD_USER_AGENT},
                 timeout=15,
             )
+            self._last_send_ts = time.time()
             if resp.status_code == 200 and resp.json().get("ok"):
                 logger.info(f"Отчёт успешно отправлен в Telegram (chat_id={target_chat}).")
                 if mark_report_sent:
                     self._save_bot_state({"last_report_sent_ts": time.time()})
                 return True
+            if resp.status_code == 429 and not is_testing:
+                retry_after = int(resp.json().get("parameters", {}).get("retry_after", 5))
+                logger.warning(f"Telegram FloodWait ({retry_after}s)...")
+                time.sleep(retry_after + 1.0)
             logger.error(f"Telegram API error ({resp.status_code}): {resp.text}")
             return False
         except Exception as e:
@@ -292,12 +315,15 @@ class TelegramNotifier:
             return False
 
     def process_pending_commands(self, accounts: List[AccountRecord]) -> None:
-        """Reply to /start or /stats commands sent to @PixellinnoBobmbardinnoBOT between CI runs."""
+        """Reply to /start or /stats commands sent to @pixelfarmik143714bot locally."""
         if not self.bot_token:
+            return
+        # Avoid polling getUpdates from rotating GitHub Actions datacenter IPs to prevent bot freeze
+        if os.getenv("GITHUB_ACTIONS") == "true" and os.getenv("TELEGPIXEL_POLL_IN_CI", "").lower() != "true":
             return
         st = self._load_bot_state()
         offset = st.get("last_update_id")
-        params: Dict[str, Any] = {"timeout": 1}
+        params: Dict[str, Any] = {"timeout": 0}
         if isinstance(offset, int):
             params["offset"] = offset + 1
 
@@ -305,6 +331,7 @@ class TelegramNotifier:
             resp = requests.get(
                 f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
                 params=params,
+                headers={"User-Agent": STANDARD_USER_AGENT},
                 timeout=8,
             )
             data = resp.json()
@@ -333,8 +360,8 @@ class TelegramNotifier:
 
                 if text.startswith(("/start", "/help")):
                     reply = (
-                        "👋 <b>Привет! Я бот отчётов TelegPixel (@PixellinnoBobmbardinnoBOT).</b>\n\n"
-                        "Каждый день через GitHub Actions я автоматически захожу со всех твоих аккаунтов в "
+                        "👋 <b>Привет! Я бот отчётов TelegPixel (@pixelfarmik143714bot).</b>\n\n"
+                        "Каждый день я автоматически захожу со всех твоих аккаунтов в "
                         "<b>Gemini Pro Automation Bot 🎓</b> (<code>@sheeridverifier_bot</code>), "
                         "пишу <code>/checkin</code> и присылаю сюда сводку по монеткам на каждом аккаунте.\n\n"
                         f"📌 <b>Твой Chat ID:</b> <code>{cid}</code>\n"

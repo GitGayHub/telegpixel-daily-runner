@@ -98,17 +98,11 @@ jobs:
         if: failure()
         continue-on-error: true
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGPIXEL_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGPIXEL_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          TELEGPIXEL_BOT_TOKEN: ${{ secrets.TELEGPIXEL_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGPIXEL_CHAT_ID: ${{ secrets.TELEGPIXEL_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
-          import os, requests
-          token = os.getenv('TELEGRAM_BOT_TOKEN')
-          chat_id = os.getenv('TELEGRAM_CHAT_ID')
-          if token and chat_id:
-              text = '❌ <b>TelegPixel — Ошибка в GitHub Actions!</b>\n\nПрогон завершился с ошибкой. Проверьте логи во вкладке Actions.'
-              try:
-                  requests.post(f'https://api.telegram.org/bot{token}/sendMessage', json={'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}, timeout=10)
-              except Exception:
-                  pass
+          from telegpixel.notifier import TelegramNotifier
+          notifier = TelegramNotifier()
+          notifier.send_message('❌ <b>TelegPixel — Ошибка в GitHub Actions!</b>\n\nПрогон завершился с ошибкой. Проверьте логи во вкладке Actions.')
           "

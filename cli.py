@@ -2,7 +2,7 @@
 """
 Command Line Interface (CLI) for TelegPixel Daily Check-in & Coin Tracker.
 Automates daily /checkin in Gemini Pro Automation Bot (@sheeridverifier_bot)
-and sends per-account coin summaries via Telegram Bot API (@PixellinnoBobmbardinnoBOT).
+and sends per-account coin summaries via Telegram Bot API (@pixelfarmik143714bot).
 """
 
 from __future__ import annotations
