@@ -351,3 +351,48 @@ class CheckinRunner:
             if idx < len(accounts) - 1 and self.inter_account_delay > 0:
                 await asyncio.sleep(self.inter_account_delay)
         return results
+
+    async def send_report_to_saved_messages(
+        self,
+        accounts: List[AccountRecord],
+        report_html: str,
+        target_chat_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Fallback delivery: if Bot API token is unavailable/revoked, deliver the HTML coin report
+        directly into the primary account's 'Saved Messages' ('Избранное') via Telethon.
+        """
+        target_uid = int(target_chat_id) if (target_chat_id and target_chat_id.isdigit()) else None
+        candidates = sorted(
+            accounts,
+            key=lambda a: (0 if (target_uid and a.user_id == target_uid) else 1),
+        )
+        for acc in candidates:
+            if not acc.session:
+                continue
+            client = TelegramClient(
+                session=StringSession(acc.session),
+                api_id=self.api_id,
+                api_hash=self.api_hash,
+                device_model=acc.device_model or DESKTOP_DEVICE_MODEL,
+                system_version=acc.system_version or DESKTOP_SYSTEM_VERSION,
+                app_version=acc.app_version or DESKTOP_APP_VERSION,
+                lang_code="en",
+                system_lang_code="en-US",
+                receive_updates=False,
+            )
+            try:
+                await asyncio.wait_for(client.connect(), timeout=15.0)
+                if not await client.is_user_authorized():
+                    continue
+                await client.send_message("me", report_html, parse_mode="html", link_preview=False)
+                logger.info(f"Отчёт доставлен в 'Избранное' аккаунта {acc.display_name}!")
+                return True
+            except Exception as e:
+                logger.debug(f"Could not send fallback report via {acc.display_name}: {e}")
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        return False

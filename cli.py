@@ -166,7 +166,12 @@ def cmd_run(account_name: Optional[str], dry_run: bool, no_telegram: bool, smart
 
     if not no_telegram and notifier.should_send_report(results, smart_notify=smart_notify):
         report_html = notifier.format_report(results, dry_run=dry_run)
-        notifier.send_message(report_html, mark_report_sent=True)
+        sent_ok = notifier.send_message(report_html, mark_report_sent=True)
+        if not sent_ok:
+            if asyncio.run(runner.send_report_to_saved_messages(accounts, report_html, notifier.chat_id)):
+                notifier._save_bot_state(
+                    {**notifier._load_bot_state(), "last_report_sent_ts": __import__("time").time()}
+                )
 
     # Fail CI step only if ALL accounts failed
     if results and all(r.status == CheckinStatus.FAILED for r in results):
@@ -205,7 +210,9 @@ def cmd_stats(cached: bool, no_telegram: bool) -> None:
 
     _print_results_table(results)
     if not no_telegram:
-        notifier.send_message(notifier.format_report(results, stats_only=True))
+        report_html = notifier.format_report(results, stats_only=True)
+        if not notifier.send_message(report_html):
+            asyncio.run(CheckinRunner().send_report_to_saved_messages(accounts, report_html, notifier.chat_id))
 
 
 @cli.command("list-accounts")

@@ -359,12 +359,16 @@ async def mint_cloud_session_from_slot(
         fname = (me.first_name or "").strip()
         phone = me.phone or ""
         display = f"@{me.username}" if me.username else (fname or f"ID:{me.id}")
+        dev_model, sys_ver, app_ver = select_hardware_profile(phone or str(me.id))
 
         new_client = _make_desktop_client(
             session=StringSession(),
             api_id=api_id,
             api_hash=api_hash,
             receive_updates=False,
+            device_model=dev_model,
+            system_version=sys_ver,
+            app_version=app_ver,
         )
         await new_client.connect()
         try:
@@ -414,6 +418,9 @@ async def mint_cloud_session_from_slot(
                 first_name=fname,
                 phone=phone,
                 enabled=True,
+                device_model=dev_model,
+                system_version=sys_ver,
+                app_version=app_ver,
             )
         finally:
             await new_client.disconnect()
