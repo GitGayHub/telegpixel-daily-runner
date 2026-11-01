@@ -49,8 +49,18 @@ class TelegramNotifier:
         tz_name: Optional[str] = None,
         state_file: Optional[Path] = None,
     ) -> None:
-        self.bot_token = (bot_token or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-        self.chat_id = str(chat_id or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+        self.bot_token = (
+            bot_token
+            or os.getenv("TELEGPIXEL_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or ""
+        ).strip()
+        self.chat_id = str(
+            chat_id
+            or os.getenv("TELEGPIXEL_CHAT_ID")
+            or os.getenv("TELEGRAM_CHAT_ID")
+            or ""
+        ).strip()
         self.tz_name = tz_name or os.getenv("APP_TIMEZONE", "Europe/Berlin")
         self.state_file = state_file or DEFAULT_BOT_STATE_FILE
         self.verify_cost = int(os.getenv("VERIFY_COST_COINS", "30"))

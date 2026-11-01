@@ -172,6 +172,13 @@ class CheckinRunner:
                 await asyncio.sleep(1.0)
                 reply = await self._send_and_wait_reply(client, bot_entity, "/checkin")
                 parsed = parse_checkin_reply(reply)
+            elif parsed.status == CheckinStatus.FAILED and "обслуживании" not in (parsed.error_reason or ""):
+                # If the account never started the bot before, send /start once and retry /checkin
+                logger.info(f"[{account.display_name}] Initializing bot via /start and retrying /checkin...")
+                await self._send_and_wait_reply(client, bot_entity, "/start")
+                await asyncio.sleep(1.5)
+                reply = await self._send_and_wait_reply(client, bot_entity, "/checkin")
+                parsed = parse_checkin_reply(reply)
 
             # Always ensure we know the exact current coin balance!
             # If /checkin reply didn't include balance (e.g. "Already checked in today!"), query /me

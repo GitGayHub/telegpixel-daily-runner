@@ -95,11 +95,13 @@ def _auto_sync_github_if_possible(mgr: AccountManager) -> None:
     secrets_map = {
         "TELEGPIXEL_ACCOUNTS_JSON": mgr.export_secret_json(),
     }
-    bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    bot_token = (os.getenv("TELEGPIXEL_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGPIXEL_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if bot_token:
+        secrets_map["TELEGPIXEL_BOT_TOKEN"] = bot_token
         secrets_map["TELEGRAM_BOT_TOKEN"] = bot_token
     if chat_id:
+        secrets_map["TELEGPIXEL_CHAT_ID"] = chat_id
         secrets_map["TELEGRAM_CHAT_ID"] = chat_id
 
     try:
@@ -359,11 +361,13 @@ def cmd_sync_secrets(repo: Optional[str], trigger: bool) -> None:
     secrets_map = {
         "TELEGPIXEL_ACCOUNTS_JSON": mgr.export_secret_json(),
     }
-    bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    bot_token = (os.getenv("TELEGPIXEL_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGPIXEL_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if bot_token:
+        secrets_map["TELEGPIXEL_BOT_TOKEN"] = bot_token
         secrets_map["TELEGRAM_BOT_TOKEN"] = bot_token
     if chat_id:
+        secrets_map["TELEGPIXEL_CHAT_ID"] = chat_id
         secrets_map["TELEGRAM_CHAT_ID"] = chat_id
 
     target_repo = repo or detect_github_repo()

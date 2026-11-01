@@ -61,8 +61,10 @@ jobs:
           TELEGPIXEL_ACCOUNTS_JSON: ${{ secrets.TELEGPIXEL_ACCOUNTS_JSON }}
           TELEGPIXEL_ACCOUNTS_JSON_1: ${{ secrets.TELEGPIXEL_ACCOUNTS_JSON_1 }}
           TELEGPIXEL_ACCOUNTS_JSON_2: ${{ secrets.TELEGPIXEL_ACCOUNTS_JSON_2 }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGPIXEL_BOT_TOKEN: ${{ secrets.TELEGPIXEL_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGPIXEL_CHAT_ID: ${{ secrets.TELEGPIXEL_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGPIXEL_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGPIXEL_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID || '2040' }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH || 'b18441a1ff607e10a989891a5462e627' }}
           TARGET_BOT_USERNAME: ${{ secrets.TARGET_BOT_USERNAME || 'sheeridverifier_bot' }}
@@ -92,8 +94,8 @@ jobs:
         if: failure()
         continue-on-error: true
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGPIXEL_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGPIXEL_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
           import os, requests
