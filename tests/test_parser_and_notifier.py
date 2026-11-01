@@ -152,3 +152,23 @@ def test_account_manager_and_report_formatting(tmp_path: Path):
     assert "28 монет" in report
     assert "58 монет" in report
     assert "хватает на /verify" in report
+
+
+def test_smart_notify_throttling(tmp_path: Path):
+    bot_state = tmp_path / "bot_state.json"
+    notifier = TelegramNotifier(bot_token="dummy", chat_id="123", state_file=bot_state)
+    acc = AccountRecord(user_id=111, username="alpha_acc", session="sess1", balance=30)
+
+    cooldown_only = [AccountRunResult(account=acc, status=CheckinStatus.COOLDOWN, balance=30)]
+    claimed_run = [AccountRunResult(account=acc, status=CheckinStatus.CLAIMED, coins_earned=1, balance=31)]
+
+    # First cooldown run with no prior report -> should send
+    assert notifier.should_send_report(cooldown_only, smart_notify=True) is True
+    notifier._save_bot_state({"last_report_sent_ts": 9999999999.0})
+
+    # Recent report already sent & only cooldown -> skip duplicate spam
+    assert notifier.should_send_report(cooldown_only, smart_notify=True) is False
+    # Claimed coins -> always send immediately even if recent report existed!
+    assert notifier.should_send_report(claimed_run, smart_notify=True) is True
+    # Manual run (smart_notify=False) -> always send!
+    assert notifier.should_send_report(cooldown_only, smart_notify=False) is True

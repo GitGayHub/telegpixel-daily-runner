@@ -126,7 +126,12 @@ def cli(verbose: bool) -> None:
 @click.option("-a", "--account", "account_name", default=None, help="Запустить только для одного аккаунта.")
 @click.option("--dry-run", is_flag=True, help="Проверить баланс (/me) без отправки /checkin.")
 @click.option("--no-telegram", is_flag=True, help="Не отправлять итоговый отчёт в Telegram-бота.")
-def cmd_run(account_name: Optional[str], dry_run: bool, no_telegram: bool) -> None:
+@click.option(
+    "--smart-notify",
+    is_flag=True,
+    help="Отправлять отчёт только если получены монеты, есть ошибка или прошло >20ч (для частых cron-прогонов).",
+)
+def cmd_run(account_name: Optional[str], dry_run: bool, no_telegram: bool, smart_notify: bool) -> None:
     """Выполнить ежедневный /checkin на всех аккаунтах и прислать отчёт."""
     mgr = AccountManager()
     notifier = TelegramNotifier()
@@ -159,9 +164,9 @@ def cmd_run(account_name: Optional[str], dry_run: bool, no_telegram: bool) -> No
 
     _print_results_table(results)
 
-    if not no_telegram:
+    if not no_telegram and notifier.should_send_report(results, smart_notify=smart_notify):
         report_html = notifier.format_report(results, dry_run=dry_run)
-        notifier.send_message(report_html)
+        notifier.send_message(report_html, mark_report_sent=True)
 
     # Fail CI step only if ALL accounts failed
     if results and all(r.status == CheckinStatus.FAILED for r in results):

@@ -9,6 +9,7 @@ import html
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -238,7 +239,28 @@ class TelegramNotifier:
         lines.append(self.get_environment_label())
         return "\n".join(lines)
 
-    def send_message(self, html_text: str) -> bool:
+    def should_send_report(self, results: List[AccountRunResult], smart_notify: bool = False) -> bool:
+        """
+        In smart_notify mode (used for frequent 8h cron runs), skip duplicate cooldown-only reports
+        unless at least 20 hours have elapsed since the last sent report.
+        Always send immediately if any account claimed coins or encountered an error.
+        """
+        if not smart_notify:
+            return True
+        has_claimed = any(r.status == CheckinStatus.CLAIMED for r in results)
+        has_failed = any(r.status == CheckinStatus.FAILED for r in results)
+        if has_claimed or has_failed:
+            return True
+
+        st = self._load_bot_state()
+        last_ts = float(st.get("last_report_sent_ts") or 0.0)
+        if (time.time() - last_ts) >= 20 * 3600:
+            return True
+
+        logger.info("Все аккаунты уже на кулдауне, а сводка за сегодня уже отправлялась — пропуск дубля.")
+        return False
+
+    def send_message(self, html_text: str, mark_report_sent: bool = False) -> bool:
         if not self.bot_token:
             logger.warning("TELEGRAM_BOT_TOKEN не задан — пропуск отправки уведомления.")
             return False
@@ -260,6 +282,8 @@ class TelegramNotifier:
             )
             if resp.status_code == 200 and resp.json().get("ok"):
                 logger.info(f"Отчёт успешно отправлен в Telegram (chat_id={target_chat}).")
+                if mark_report_sent:
+                    self._save_bot_state({"last_report_sent_ts": time.time()})
                 return True
             logger.error(f"Telegram API error ({resp.status_code}): {resp.text}")
             return False

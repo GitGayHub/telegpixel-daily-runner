@@ -2,8 +2,8 @@ name: Daily Check-in Runner
 
 on:
   schedule:
-    # Запускается автоматически каждый день в 07:15 UTC (08:15 Берлин зимой / 09:15 летом)
-    - cron: '15 7 * * *'
+    # Запускается каждые 8 часов (00:15, 08:15, 16:15 UTC) для надёжного сбора /checkin
+    - cron: '15 */8 * * *'
   workflow_dispatch:
     inputs:
       action:
@@ -72,12 +72,16 @@ jobs:
         run: |
           mkdir -p data
           ACTION="${{ inputs.action || 'run' }}"
+          NOTIFY_FLAG=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            NOTIFY_FLAG="--smart-notify"
+          fi
           if [ "$ACTION" = "stats" ]; then
             python cli.py stats
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python cli.py run --dry-run
           else
-            python cli.py run
+            python cli.py run $NOTIFY_FLAG
           fi
 
       - name: Save Persistent State Cache
