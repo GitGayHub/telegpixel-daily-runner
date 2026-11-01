@@ -315,11 +315,10 @@ class TelegramNotifier:
             return False
 
     def process_pending_commands(self, accounts: List[AccountRecord]) -> None:
-        """Reply to /start or /stats commands sent to @pixelfarmik143714bot locally."""
+        """Reply to /start or /stats commands sent to @pixelfarmik143714bot."""
         if not self.bot_token:
             return
-        # Avoid polling getUpdates from rotating GitHub Actions datacenter IPs to prevent bot freeze
-        if os.getenv("GITHUB_ACTIONS") == "true" and os.getenv("TELEGPIXEL_POLL_IN_CI", "").lower() != "true":
+        if os.getenv("TELEGPIXEL_POLL_IN_CI", "true").lower() == "false":
             return
         st = self._load_bot_state()
         offset = st.get("last_update_id")
