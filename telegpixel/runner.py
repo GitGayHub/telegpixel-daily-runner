@@ -32,6 +32,9 @@ logger = logging.getLogger("telegpixel.runner")
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 DEFAULT_TARGET_BOT = "sheeridverifier_bot"
+DESKTOP_DEVICE_MODEL = "Desktop"
+DESKTOP_SYSTEM_VERSION = "Windows 10"
+DESKTOP_APP_VERSION = "5.8.3 x64"
 
 
 @dataclass
@@ -166,9 +169,11 @@ class CheckinRunner:
             session=StringSession(account.session),
             api_id=self.api_id,
             api_hash=self.api_hash,
-            device_model="TelegPixel Cloud Runner",
-            system_version="Ubuntu Linux",
-            app_version="1.0.0",
+            device_model=DESKTOP_DEVICE_MODEL,
+            system_version=DESKTOP_SYSTEM_VERSION,
+            app_version=DESKTOP_APP_VERSION,
+            lang_code="en",
+            system_lang_code="en-US",
             receive_updates=False,
         )
 

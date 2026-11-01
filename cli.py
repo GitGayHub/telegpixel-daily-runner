@@ -337,6 +337,234 @@ def cmd_add_account(method: Optional[str], no_sync: bool) -> None:
         console.print("[red]❌ Не удалось авторизовать аккаунт.[/red]")
 
 
+@cli.command("reauth")
+@click.option("--password", "default_2fa", default=None, help="Облачный пароль 2FA (если одинаковый).")
+@click.option(
+    "--method",
+    type=click.Choice(["phone", "qr"], case_sensitive=False),
+    default="phone",
+    show_default=True,
+    help="Способ перепривязки без AyuGram: phone (код на аккаунт) или qr (скан с телефона).",
+)
+@click.option("--no-sync", is_flag=True, help="Не синхронизировать секреты в GitHub автоматически.")
+def cmd_reauth(default_2fa: Optional[str], method: str, no_sync: bool) -> None:
+    """Проверить все сессии и переподключить слетевшие аккаунты напрямую (без AyuGram)."""
+    from telegpixel.ayugram_importer import (
+        check_session_authorized,
+        login_account_via_phone,
+        login_account_via_qr,
+    )
+
+    mgr = AccountManager()
+    accounts = mgr.list_accounts(enabled_only=False)
+    if not accounts:
+        console.print("[yellow]⚠️ Нет аккаунтов в data/accounts.json.[/yellow]")
+        return
+
+    console.print("[bold cyan]🔍 Проверка активности сессий всех аккаунтов...[/bold cyan]")
+
+    async def _check_all() -> list[AccountRecord]:
+        expired_list: list[AccountRecord] = []
+        for acc in accounts:
+            alive = await check_session_authorized(acc)
+            if alive:
+                console.print(f"  [bold green]✅ {acc.display_name}[/bold green] — сессия активна")
+            else:
+                phone_hint = f" (+{acc.phone.lstrip('+')})" if acc.phone else ""
+                console.print(f"  [bold red]❌ {acc.display_name}{phone_hint}[/bold red] — сессия сброшена")
+                expired_list.append(acc)
+        return expired_list
+
+    expired = asyncio.run(_check_all())
+    if not expired:
+        console.print("\n[bold green]🎉 Все аккаунты активны! Перепривязка не требуется.[/bold green]")
+        return
+
+    console.print(
+        f"\n[bold yellow]⚡ Найдено слетевших аккаунтов: {len(expired)}. "
+        f"Сейчас создадим для них прямые (корневые) сессии — входить в AyuGram НЕ нужно![/bold yellow]"
+    )
+
+    env_2fa = (default_2fa or os.getenv("TELEGPIXEL_DEFAULT_2FA") or "").strip() or None
+
+    updated_count = 0
+    for acc in expired:
+        tried_env_2fa = False
+
+        def prompt_2fa(label: str) -> Optional[str]:
+            nonlocal tried_env_2fa
+            if env_2fa and not tried_env_2fa:
+                tried_env_2fa = True
+                return env_2fa
+            pwd = click.prompt(f"Введите облачный 2FA-пароль для {label}", default="", show_default=False)
+            return pwd.strip() or None
+        phone_str = f"+{acc.phone.lstrip('+')}" if acc.phone else ""
+        console.print(f"\n[bold cyan]➡️ Восстановление {acc.display_name} ({acc.first_name or acc.user_id})[/bold cyan]")
+        use_method = method.lower()
+        if use_method == "phone" and not phone_str:
+            phone_str = click.prompt(f"Введите номер телефона для {acc.display_name} (+380... / +49...)").strip()
+
+        if use_method == "qr":
+            rec = asyncio.run(login_account_via_qr(password_provider=prompt_2fa, print_fn=console.print))
+        else:
+            console.print(f"📲 Отправляю код подтверждения на [bold]{phone_str}[/bold]...")
+            rec = asyncio.run(
+                login_account_via_phone(
+                    phone=phone_str,
+                    code_provider=lambda: click.prompt(f"Введите 5-значный код из Telegram/SMS для {acc.display_name}"),
+                    password_provider=prompt_2fa,
+                )
+            )
+
+        if rec:
+            rec.last_error = None
+            mgr.upsert_account(rec)
+            mgr.save_accounts()
+            mgr.save_state()
+            updated_count += 1
+            console.print(f"[bold green]✅ {rec.display_name} успешно восстановлен (прямая сессия)![/bold green]")
+
+    if updated_count > 0 and not no_sync:
+        _auto_sync_github_if_possible(mgr)
+
+
+@cli.command("send-code")
+@click.argument("target")
+def cmd_send_code(target: str) -> None:
+    """Шаг 1 прямого входа: отправить код на телефон или @username из базы."""
+    from telegpixel.ayugram_importer import send_login_code
+
+    mgr = AccountManager()
+    needle = target.strip().lstrip("@").lower()
+    phone = target.strip()
+    label = target.strip()
+    for acc in mgr.list_accounts(enabled_only=False):
+        if acc.username.lower() == needle or str(acc.user_id) == needle or (acc.first_name or "").lower() == needle:
+            if acc.phone:
+                phone = f"+{acc.phone.lstrip('+')}"
+                label = f"{acc.display_name} ({phone})"
+            break
+
+    delivery = asyncio.run(send_login_code(phone))
+    console.print(f"[bold green]📲 Код отправлен для {label} (тип доставки: {delivery}).[/bold green]")
+
+
+@cli.command("confirm-code")
+@click.argument("target")
+@click.argument("code")
+@click.option("--password", "password_2fa", default=None, help="Облачный пароль 2FA (если включён).")
+@click.option("--no-sync", is_flag=True, help="Не синхронизировать секреты в GitHub автоматически.")
+def cmd_confirm_code(target: str, code: str, password_2fa: Optional[str], no_sync: bool) -> None:
+    """Шаг 2 прямого входа: подтвердить 5-значный код и сохранить корневую сессию."""
+    from telegpixel.ayugram_importer import complete_login_code
+
+    mgr = AccountManager()
+    needle = target.strip().lstrip("@").lower()
+    phone = target.strip()
+    for acc in mgr.list_accounts(enabled_only=False):
+        if acc.username.lower() == needle or str(acc.user_id) == needle or (acc.first_name or "").lower() == needle:
+            if acc.phone:
+                phone = f"+{acc.phone.lstrip('+')}"
+            break
+
+    pwd = password_2fa or (os.getenv("TELEGPIXEL_DEFAULT_2FA") or "").strip() or None
+    rec = asyncio.run(complete_login_code(phone=phone, code=code, password=pwd))
+    rec.last_error = None
+    mgr.upsert_account(rec)
+    mgr.save_accounts()
+    mgr.save_state()
+    console.print(f"[bold green]🎉 Прямая сессия для {rec.display_name} (ID: {rec.user_id}) сохранена![/bold green]")
+    if not no_sync:
+        _auto_sync_github_if_possible(mgr)
+
+
+@cli.command("detach-ayugram")
+@click.option(
+    "--tdata",
+    "tdata_dir",
+    default=str(Path.home() / "Documents" / "AyuGram" / "tdata"),
+    show_default=True,
+    help="Путь к папке tdata клиента AyuGram.",
+)
+@click.option(
+    "-r",
+    "--remove",
+    "remove_targets",
+    multiple=True,
+    help="Кого убрать из AyuGram (@username, имя или user_id) без сброса облачной сессии.",
+)
+@click.option("--close-ayugram", "auto_close", is_flag=True, help="Автоматически закрыть AyuGram.exe перед правкой.")
+def cmd_detach_ayugram(tdata_dir: str, remove_targets: tuple[str, ...], auto_close: bool) -> None:
+    """Убрать аккаунт из AyuGram локально БЕЗ нажатия 'Выйти' (сессия бота НЕ слетает!)."""
+    from telegpixel.ayugram_importer import (
+        close_ayugram,
+        detach_accounts_from_tdata,
+        is_ayugram_running,
+        read_tdata_slots,
+    )
+
+    tpath = Path(tdata_dir)
+    mgr = AccountManager()
+    known_by_uid = {a.user_id: a for a in mgr.list_accounts(enabled_only=False)}
+
+    slots = read_tdata_slots(tpath)
+    if not slots:
+        console.print("[yellow]В папке AyuGram нет активных слотов.[/yellow]")
+        return
+
+    console.print("[bold cyan]📂 Сейчас в AyuGram на ПК открыты слоты:[/bold cyan]")
+    for slot_idx, uid, dc, _ in slots:
+        acc = known_by_uid.get(uid)
+        label = f"{acc.display_name} ({acc.first_name or '—'})" if acc else f"ID:{uid}"
+        console.print(f"  • Слот #{slot_idx}: [bold]{label}[/bold] [dim](ID: {uid}, DC{dc})[/dim]")
+
+    uids_to_remove: set[int] = set()
+    if remove_targets:
+        for t in remove_targets:
+            needle = t.strip().lstrip("@").lower()
+            for _, uid, _, _ in slots:
+                acc = known_by_uid.get(uid)
+                if (
+                    str(uid) == needle
+                    or (acc and acc.username.lower() == needle)
+                    or (acc and (acc.first_name or "").strip().lower() == needle)
+                ):
+                    uids_to_remove.add(uid)
+    else:
+        raw = click.prompt(
+            "\nВведите @username, имя или User ID аккаунта(ов) через запятую, которые убрать из AyuGram на ПК"
+        )
+        for part in raw.split(","):
+            needle = part.strip().lstrip("@").lower()
+            if not needle:
+                continue
+            for _, uid, _, _ in slots:
+                acc = known_by_uid.get(uid)
+                if (
+                    str(uid) == needle
+                    or (acc and acc.username.lower() == needle)
+                    or (acc and (acc.first_name or "").strip().lower() == needle)
+                ):
+                    uids_to_remove.add(uid)
+
+    if not uids_to_remove:
+        console.print("[yellow]Не выбрано ни одного совпавшего аккаунта из AyuGram.[/yellow]")
+        return
+
+    if is_ayugram_running():
+        if auto_close or click.confirm("AyuGram сейчас запущен. Закрыть его на пару секунд для безопасной отвязки?", default=True):
+            close_ayugram()
+        else:
+            console.print("[red]Отменено: сначала закройте AyuGram.[/red]")
+            return
+
+    removed = detach_accounts_from_tdata(tpath, uids_to_remove)
+    console.print(
+        f"[bold green]✅ Локально убрано из AyuGram слотов: {len(removed)} (ID: {removed}) — "
+        f"облачные сессии для бота остались ЖИВЫМИ![/bold green]"
+    )
+
+
 @cli.command("remove-account")
 @click.argument("identifier")
 @click.option("--no-sync", is_flag=True, help="Не синхронизировать секреты в GitHub автоматически.")

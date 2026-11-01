@@ -1,28 +1,42 @@
 """
-Local account import & login utilities:
+Local account import, standalone root login, and safe tdata detach utilities:
 1. Extract sessions non-destructively from AyuGram / Telegram Desktop tdata and mint
    independent cloud StringSessions (preventing AuthKeyDuplicatedError on GitHub Actions).
-2. Add extra accounts directly via Terminal QR Code or Phone + Code.
+2. Add or re-authorize accounts directly via Phone + Code or Terminal QR Code (creates a
+   standalone root session with zero link to AyuGram, so AyuGram is never needed).
+3. Detach extra accounts locally from AyuGram's tdata without calling Telegram's server-side
+   LogOut (preventing Telegram from cascade-revoking fresh <24h child sessions).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from telethon import TelegramClient, errors, functions, types
 from telethon.crypto import AuthKey
 from telethon.sessions import MemorySession, StringSession
 
-from telegpixel.accounts import AccountRecord
-from telegpixel.runner import DEFAULT_API_HASH, DEFAULT_API_ID
+from telegpixel.accounts import DEFAULT_ACCOUNTS_FILE, AccountRecord
+from telegpixel.runner import (
+    DEFAULT_API_HASH,
+    DEFAULT_API_ID,
+    DESKTOP_APP_VERSION,
+    DESKTOP_DEVICE_MODEL,
+    DESKTOP_SYSTEM_VERSION,
+)
 
 logger = logging.getLogger("telegpixel.importer")
 
 DEFAULT_AYUGRAM_TDATA = Path.home() / "Documents" / "AyuGram" / "tdata"
+DEFAULT_PENDING_AUTH_DIR = DEFAULT_ACCOUNTS_FILE.parent
 
 DC_ADDRESSES = {
     1: ("149.154.175.53", 443),
@@ -31,6 +45,57 @@ DC_ADDRESSES = {
     4: ("149.154.167.91", 443),
     5: ("91.108.56.130", 443),
 }
+
+
+def _make_desktop_client(
+    session: object,
+    api_id: int = DEFAULT_API_ID,
+    api_hash: str = DEFAULT_API_HASH,
+    receive_updates: bool = False,
+) -> TelegramClient:
+    return TelegramClient(
+        session=session,
+        api_id=api_id,
+        api_hash=api_hash,
+        device_model=DESKTOP_DEVICE_MODEL,
+        system_version=DESKTOP_SYSTEM_VERSION,
+        app_version=DESKTOP_APP_VERSION,
+        lang_code="en",
+        system_lang_code="en-US",
+        receive_updates=receive_updates,
+    )
+
+
+def normalize_phone(phone: str) -> str:
+    digits = re.sub(r"\D+", "", phone or "")
+    return f"+{digits}" if digits else ""
+
+
+async def check_session_authorized(
+    account: AccountRecord,
+    api_id: int = DEFAULT_API_ID,
+    api_hash: str = DEFAULT_API_HASH,
+) -> bool:
+    """Return True if the account's saved StringSession is still valid on Telegram servers."""
+    if not account.session:
+        return False
+    client = _make_desktop_client(
+        session=StringSession(account.session),
+        api_id=api_id,
+        api_hash=api_hash,
+        receive_updates=False,
+    )
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15.0)
+        return bool(await client.is_user_authorized())
+    except Exception as e:
+        logger.debug(f"Session check failed for {account.display_name}: {e}")
+        return False
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 def read_tdata_slots(tdata_path: Path, passcode: str = "") -> List[Tuple[int, int, int, bytes]]:
@@ -43,7 +108,7 @@ def read_tdata_slots(tdata_path: Path, passcode: str = "") -> List[Tuple[int, in
         from PyQt5.QtCore import QByteArray, QDataStream
     except ImportError as e:
         raise RuntimeError(
-            "Для авто-импорта из папки AyuGram требуются пакеты opentele и PyQt5 "
+            "Для работы с папкой AyuGram требуются пакеты opentele и PyQt5 "
             "(pip install opentele PyQt5)."
         ) from e
 
@@ -94,6 +159,149 @@ def read_tdata_slots(tdata_path: Path, passcode: str = "") -> List[Tuple[int, in
     return slots
 
 
+def is_ayugram_running() -> bool:
+    """Check whether AyuGram.exe is currently running on Windows."""
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq AyuGram.exe", "/NH"],
+            stderr=subprocess.DEVNULL,
+        ).decode("cp866", errors="ignore")
+        return "ayugram.exe" in out.lower()
+    except Exception:
+        return False
+
+
+def close_ayugram() -> bool:
+    """Gracefully terminate AyuGram.exe before editing local tdata files."""
+    if not is_ayugram_running():
+        return True
+    subprocess.run(
+        ["taskkill", "/IM", "AyuGram.exe", "/F"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return not is_ayugram_running()
+
+
+def detach_accounts_from_tdata(
+    tdata_path: Path,
+    remove_user_ids: Set[int],
+    passcode: str = "",
+) -> List[int]:
+    """
+    Locally remove specific user_ids from AyuGram's key_datas WITHOUT calling Telegram's
+    server-side auth.LogOutRequest().
+    This keeps child QR sessions alive even if the parent AyuGram session was <24h old!
+    """
+    try:
+        import opentele.td as td
+        from PyQt5.QtCore import QBuffer, QByteArray, QDataStream, QIODevice
+    except ImportError as e:
+        raise RuntimeError("Для локальной отвязки из AyuGram требуются пакеты opentele и PyQt5.") from e
+
+    if is_ayugram_running():
+        raise RuntimeError(
+            "AyuGram.exe сейчас запущен. Закройте AyuGram (или используйте флаг --close-ayugram), "
+            "чтобы он не перезаписал key_datas при выходе."
+        )
+
+    if not tdata_path.exists():
+        raise FileNotFoundError(f"Папка tdata не найдена: {tdata_path}")
+
+    slots = read_tdata_slots(tdata_path, passcode=passcode)
+    slot_to_uid: Dict[int, int] = {idx: uid for idx, uid, _, _ in slots}
+
+    kd = td.Storage.ReadFile("key_data", str(tdata_path))
+    orig_version = int(kd.version)
+    salt, key_encrypted, info_encrypted = QByteArray(), QByteArray(), QByteArray()
+    kd.stream >> salt >> key_encrypted >> info_encrypted
+
+    pass_bytes = QByteArray(passcode.encode("utf-8")) if passcode else QByteArray()
+    passcode_key = td.Storage.CreateLocalKey(salt, pass_bytes)
+    key_inner = td.Storage.DecryptLocal(key_encrypted, passcode_key)
+    local_key = td.AuthKey(key_inner.stream.readRawData(256))
+
+    info = td.Storage.DecryptLocal(info_encrypted, local_key)
+    count = info.stream.readInt32()
+    indices = [info.stream.readInt32() for _ in range(count)]
+    active_index = info.stream.readInt32() if not info.stream.atEnd() else (indices[0] if indices else 0)
+
+    kept_indices: List[int] = []
+    removed_indices: List[int] = []
+    removed_uids: List[int] = []
+    for idx in indices:
+        uid = slot_to_uid.get(idx)
+        if uid is not None and uid in remove_user_ids:
+            removed_indices.append(idx)
+            removed_uids.append(uid)
+        else:
+            kept_indices.append(idx)
+
+    if not removed_indices:
+        return []
+
+    if not kept_indices:
+        raise RuntimeError(
+            "В AyuGram должен остаться хотя бы один основной аккаунт (нельзя удалять все слоты сразу)."
+        )
+
+    new_active = active_index if active_index in kept_indices else kept_indices[0]
+
+    # 1. Backup original key_datas
+    backup_dir = tdata_path / "_telegpixel_detached"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    key_datas_file = tdata_path / "key_datas"
+    if key_datas_file.exists():
+        shutil.copy2(key_datas_file, backup_dir / "key_datas.bak")
+
+    # 2. Build updated encrypted info block preserving original local_key & TDF version
+    desc = td.Storage.EncryptedDescriptor(4 + 4 * len(kept_indices) + 4)
+    desc.stream.writeInt32(len(kept_indices))
+    for idx in kept_indices:
+        desc.stream.writeInt32(idx)
+    desc.stream.writeInt32(new_active)
+    new_info_encrypted = td.Storage.PrepareEncrypted(desc, local_key)
+
+    payload_qba = QByteArray()
+    buf = QBuffer()
+    buf.setBuffer(payload_qba)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    out_stream = QDataStream(buf)
+    out_stream.setVersion(QDataStream.Version.Qt_5_1)
+    out_stream << salt << key_encrypted << new_info_encrypted
+    buf.close()
+
+    payload_bytes = bytes(payload_qba.data())
+    tdf_magic = b"TDF$"
+    ver_bytes = orig_version.to_bytes(4, "little")
+    md5_input = payload_bytes + len(payload_bytes).to_bytes(4, "little") + ver_bytes + tdf_magic
+    digest = hashlib.md5(md5_input).digest()
+
+    key_datas_file.write_bytes(tdf_magic + ver_bytes + payload_bytes + digest)
+    for stale_suffix in ("0", "1"):
+        stale = tdata_path / f"key_data{stale_suffix}"
+        if stale.exists():
+            shutil.move(str(stale), str(backup_dir / stale.name))
+
+    # 3. Move detached slot files into _telegpixel_detached so AyuGram stays clean
+    for idx in removed_indices:
+        data_name = td.Storage.ComposeDataString("data", idx)
+        file_part = td.Storage.ToFilePart(td.Storage.ComputeDataNameKey(data_name))
+        for suffix in ("s", "0", "1"):
+            f = tdata_path / f"{file_part}{suffix}"
+            if f.exists():
+                shutil.move(str(f), str(backup_dir / f.name))
+        folder = tdata_path / file_part
+        if folder.exists() and folder.is_dir():
+            dest_folder = backup_dir / file_part
+            if dest_folder.exists():
+                shutil.rmtree(dest_folder, ignore_errors=True)
+            shutil.move(str(folder), str(dest_folder))
+
+    return removed_uids
+
+
 async def mint_cloud_session_from_slot(
     dc: int,
     key_bytes: bytes,
@@ -110,13 +318,10 @@ async def mint_cloud_session_from_slot(
     td_sess.set_dc(dc, ip, port)
     td_sess.auth_key = AuthKey(data=key_bytes)
 
-    td_client = TelegramClient(
+    td_client = _make_desktop_client(
         session=td_sess,
         api_id=api_id,
         api_hash=api_hash,
-        device_model="Desktop",
-        system_version="Windows 11",
-        app_version="5.8.3 x64",
         receive_updates=False,
     )
     await td_client.connect()
@@ -131,13 +336,10 @@ async def mint_cloud_session_from_slot(
         phone = me.phone or ""
         display = f"@{me.username}" if me.username else (fname or f"ID:{me.id}")
 
-        new_client = TelegramClient(
+        new_client = _make_desktop_client(
             session=StringSession(),
             api_id=api_id,
             api_hash=api_hash,
-            device_model="TelegPixel Cloud Runner",
-            system_version="Ubuntu Linux",
-            app_version="1.0.0",
             receive_updates=False,
         )
         await new_client.connect()
@@ -262,28 +464,33 @@ async def login_account_via_qr(
     api_hash: str = DEFAULT_API_HASH,
 ) -> Optional[AccountRecord]:
     """Interactive QR login from phone (Telegram -> Settings -> Devices -> Link Desktop Device)."""
-    client = TelegramClient(
+    client = _make_desktop_client(
         session=StringSession(),
         api_id=api_id,
         api_hash=api_hash,
-        device_model="TelegPixel Cloud Runner",
-        system_version="Ubuntu Linux",
-        app_version="1.0.0",
         receive_updates=True,
     )
     await client.connect()
     try:
         qr = await client.qr_login()
-        print_fn("\n📱 Откройте Telegram на телефоне -> Настройки -> Устройства -> Подключить устройство:")
+        print_fn("\n📱 Откройте Telegram на ТЕЛЕФОНЕ -> Настройки -> Устройства -> Подключить устройство:")
         print_fn(render_ascii_qr(qr.url))
-        print_fn("⏳ Ожидание сканирования QR-кода (60 сек)...")
+        print_fn("⏳ Ожидание сканирования QR-кода (90 сек)...")
         try:
-            user = await qr.wait(timeout=60)
+            user = await qr.wait(timeout=90)
         except errors.SessionPasswordNeededError:
-            pwd = password_provider("QR-аккаунт")
-            if not pwd:
+            user = None
+            for _ in range(3):
+                pwd = password_provider("QR-аккаунт")
+                if not pwd:
+                    return None
+                try:
+                    user = await client.sign_in(password=pwd)
+                    break
+                except errors.PasswordHashInvalidError:
+                    print_fn("⚠️ Неверный облачный 2FA-пароль, попробуйте ещё раз.")
+            if user is None:
                 return None
-            user = await client.sign_in(password=pwd)
 
         session_str = client.session.save()
         return AccountRecord(
@@ -305,27 +512,33 @@ async def login_account_via_phone(
     api_id: int = DEFAULT_API_ID,
     api_hash: str = DEFAULT_API_HASH,
 ) -> Optional[AccountRecord]:
-    """Interactive phone + Telegram/SMS code login."""
-    client = TelegramClient(
+    """Interactive phone + Telegram/SMS code login (creates a standalone root session)."""
+    norm_phone = normalize_phone(phone)
+    client = _make_desktop_client(
         session=StringSession(),
         api_id=api_id,
         api_hash=api_hash,
-        device_model="TelegPixel Cloud Runner",
-        system_version="Ubuntu Linux",
-        app_version="1.0.0",
         receive_updates=False,
     )
     await client.connect()
     try:
-        await client.send_code_request(phone)
-        code = code_provider().strip()
+        await client.send_code_request(norm_phone)
+        code = re.sub(r"\D+", "", code_provider().strip())
         try:
-            user = await client.sign_in(phone=phone, code=code)
+            user = await client.sign_in(phone=norm_phone, code=code)
         except errors.SessionPasswordNeededError:
-            pwd = password_provider(phone)
-            if not pwd:
+            user = None
+            for _ in range(3):
+                pwd = password_provider(norm_phone)
+                if not pwd:
+                    return None
+                try:
+                    user = await client.sign_in(password=pwd)
+                    break
+                except errors.PasswordHashInvalidError:
+                    logger.warning("Неверный облачный 2FA-пароль — введите актуальный пароль.")
+            if user is None:
                 return None
-            user = await client.sign_in(password=pwd)
 
         session_str = client.session.save()
         return AccountRecord(
@@ -333,7 +546,107 @@ async def login_account_via_phone(
             username=user.username or f"id{user.id}",
             session=session_str,
             first_name=(user.first_name or "").strip(),
-            phone=user.phone or phone.lstrip("+"),
+            phone=user.phone or norm_phone.lstrip("+"),
+            enabled=True,
+        )
+    finally:
+        await client.disconnect()
+
+
+def _pending_auth_file(phone: str, pending_dir: Optional[Path] = None) -> Path:
+    digits = re.sub(r"\D+", "", phone)
+    base = pending_dir or DEFAULT_PENDING_AUTH_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"pending_auth_{digits}.json"
+
+
+async def send_login_code(
+    phone: str,
+    pending_dir: Optional[Path] = None,
+    api_id: int = DEFAULT_API_ID,
+    api_hash: str = DEFAULT_API_HASH,
+) -> str:
+    """
+    Step 1 of two-step standalone login: send login code to phone and persist temporary
+    handshake state in gitignored data/pending_auth_<digits>.json.
+    """
+    norm_phone = normalize_phone(phone)
+    if not norm_phone:
+        raise ValueError("Некорректный номер телефона.")
+
+    client = _make_desktop_client(
+        session=StringSession(),
+        api_id=api_id,
+        api_hash=api_hash,
+        receive_updates=False,
+    )
+    await client.connect()
+    try:
+        sent = await client.send_code_request(norm_phone)
+        state = {
+            "phone": norm_phone,
+            "phone_code_hash": sent.phone_code_hash,
+            "session": client.session.save(),
+        }
+        _pending_auth_file(norm_phone, pending_dir).write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return type(sent.type).__name__
+    finally:
+        await client.disconnect()
+
+
+async def complete_login_code(
+    phone: str,
+    code: str,
+    password: Optional[str] = None,
+    pending_dir: Optional[Path] = None,
+    api_id: int = DEFAULT_API_ID,
+    api_hash: str = DEFAULT_API_HASH,
+) -> AccountRecord:
+    """
+    Step 2 of two-step standalone login: verify 5-digit code (+ optional 2FA password)
+    and return a permanent standalone AccountRecord.
+    """
+    norm_phone = normalize_phone(phone)
+    pfile = _pending_auth_file(norm_phone, pending_dir)
+    if not pfile.exists():
+        raise FileNotFoundError(
+            f"Нет активного запроса кода для {norm_phone}. Сначала вызовите send-code."
+        )
+
+    state = json.loads(pfile.read_text(encoding="utf-8"))
+    client = _make_desktop_client(
+        session=StringSession(state["session"]),
+        api_id=api_id,
+        api_hash=api_hash,
+        receive_updates=False,
+    )
+    await client.connect()
+    try:
+        clean_code = re.sub(r"\D+", "", code.strip())
+        try:
+            user = await client.sign_in(
+                phone=state["phone"],
+                code=clean_code,
+                phone_code_hash=state["phone_code_hash"],
+            )
+        except errors.SessionPasswordNeededError:
+            if not password:
+                raise RuntimeError(
+                    f"Для {norm_phone} включён облачный пароль 2FA — передайте --password."
+                )
+            user = await client.sign_in(password=password)
+
+        session_str = client.session.save()
+        pfile.unlink(missing_ok=True)
+        return AccountRecord(
+            user_id=int(user.id),
+            username=user.username or f"id{user.id}",
+            session=session_str,
+            first_name=(user.first_name or "").strip(),
+            phone=user.phone or norm_phone.lstrip("+"),
             enabled=True,
         )
     finally:

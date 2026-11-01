@@ -172,3 +172,11 @@ def test_smart_notify_throttling(tmp_path: Path):
     assert notifier.should_send_report(claimed_run, smart_notify=True) is True
     # Manual run (smart_notify=False) -> always send!
     assert notifier.should_send_report(cooldown_only, smart_notify=False) is True
+
+
+def test_normalize_phone():
+    from telegpixel.ayugram_importer import normalize_phone
+
+    assert normalize_phone("15550109999") == "+15550109999"
+    assert normalize_phone("+1 (555) 010-9999") == "+15550109999"
+    assert normalize_phone("") == ""
