@@ -103,6 +103,14 @@ _MAINTENANCE_PHRASES = (
     "bảo trì",
 )
 
+_JOIN_GATE_PHRASES = (
+    "присоединиться к каналу",
+    "присоединиться к следующим каналам",
+    "join the following channel",
+    "must join",
+    "tham gia kênh",
+)
+
 
 def extract_balance_info(text: str) -> tuple[Optional[int], Optional[float], Optional[int]]:
     """Extract (balance_coins, usd_value, streak_days) from any bot message (/checkin, /me, /start)."""
@@ -212,6 +220,16 @@ def parse_checkin_reply(text: str) -> ParsedBotResponse:
             usd_value=usd_val,
             streak_days=streak,
             raw_text=cleaned,
+        )
+
+    if any(p in low for p in _JOIN_GATE_PHRASES):
+        return ParsedBotResponse(
+            status=CheckinStatus.FAILED,
+            balance=balance,
+            usd_value=usd_val,
+            streak_days=streak,
+            raw_text=cleaned,
+            error_reason="Требуется подписка на канал бота (join gate)",
         )
 
     if any(p in low for p in _MAINTENANCE_PHRASES):

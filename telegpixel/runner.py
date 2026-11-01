@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
 
 import telegpixel.env_loader  # noqa: F401
@@ -64,12 +65,12 @@ class CheckinRunner:
         self.reply_timeout = reply_timeout
         self.inter_account_delay = inter_account_delay
 
-    async def _send_and_wait_reply(
+    async def _send_and_wait_message(
         self,
         client: TelegramClient,
         bot_entity: object,
         command: str,
-    ) -> str:
+    ) -> Tuple[str, Optional[object]]:
         sent = await client.send_message(bot_entity, command)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.reply_timeout
@@ -89,8 +90,70 @@ class CheckinRunner:
                     await client.send_read_acknowledge(bot_entity, message=msg)
                 except Exception:
                     pass
-                return txt
-        return ""
+                return txt, msg
+        return "", None
+
+    async def _send_and_wait_reply(
+        self,
+        client: TelegramClient,
+        bot_entity: object,
+        command: str,
+    ) -> str:
+        txt, _ = await self._send_and_wait_message(client, bot_entity, command)
+        return txt
+
+    @staticmethod
+    def _is_join_gate_message(text: str, msg_obj: Optional[object]) -> bool:
+        low = (text or "").lower()
+        if any(p in low for p in ("присоединиться к каналу", "присоединиться к следующим каналам", "join the following channel", "tham gia kênh")):
+            return True
+        if msg_obj is not None and getattr(msg_obj, "buttons", None):
+            for row in msg_obj.buttons:
+                for btn in row:
+                    if getattr(btn, "data", None) == b"join_gate_check":
+                        return True
+        return False
+
+    async def _satisfy_join_gate(self, client: TelegramClient, msg_obj: object, label: str) -> bool:
+        """Automatically join required Bot Channel / Bot Group Chat and click '✅ Joined'."""
+        if not msg_obj or not getattr(msg_obj, "buttons", None):
+            return False
+
+        confirm_btn = None
+        for row in msg_obj.buttons:
+            for btn in row:
+                url = getattr(btn, "url", None)
+                data = getattr(btn, "data", None)
+                if data == b"join_gate_check" or (not url and "✅" in (getattr(btn, "text", "") or "")):
+                    confirm_btn = btn
+                elif url and "t.me/" in url:
+                    m_inv = re.search(r"t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]+)", url)
+                    m_pub = re.search(r"t\.me/([A-Za-z0-9_]{4,})", url)
+                    try:
+                        if m_inv:
+                            inv_hash = m_inv.group(1)
+                            logger.info(f"[{label}] Авто-вступление по инвайту t.me/+{inv_hash[:6]}...")
+                            await client(functions.messages.ImportChatInviteRequest(hash=inv_hash))
+                        elif m_pub:
+                            chan = m_pub.group(1)
+                            logger.info(f"[{label}] Авто-подписка на @{chan}...")
+                            await client(functions.channels.JoinChannelRequest(channel=chan))
+                    except errors.UserAlreadyParticipantError:
+                        pass
+                    except errors.InviteRequestSentError:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"[{label}] Не удалось вступить в {url}: {e}")
+                    await asyncio.sleep(1.0)
+
+        if confirm_btn is not None:
+            try:
+                await confirm_btn.click()
+                await asyncio.sleep(1.5)
+                return True
+            except Exception as e:
+                logger.warning(f"[{label}] Ошибка нажатия кнопки подтверждения подписки: {e}")
+        return False
 
     async def process_single_account(
         self,
@@ -134,7 +197,10 @@ class CheckinRunner:
             bot_entity = await client.get_entity(self.target_bot)
 
             if dry_run or stats_only:
-                reply = await self._send_and_wait_reply(client, bot_entity, "/me")
+                reply, msg_obj = await self._send_and_wait_message(client, bot_entity, "/me")
+                if self._is_join_gate_message(reply, msg_obj) and msg_obj is not None:
+                    await self._satisfy_join_gate(client, msg_obj, account.display_name)
+                    reply, _ = await self._send_and_wait_message(client, bot_entity, "/me")
                 if not reply:
                     reply = await self._send_and_wait_reply(client, bot_entity, "/start")
                 parsed = parse_profile_reply(reply)
@@ -162,7 +228,12 @@ class CheckinRunner:
                 )
 
             # Live daily /checkin execution
-            reply = await self._send_and_wait_reply(client, bot_entity, "/checkin")
+            reply, msg_obj = await self._send_and_wait_message(client, bot_entity, "/checkin")
+            if self._is_join_gate_message(reply, msg_obj) and msg_obj is not None:
+                logger.info(f"[{account.display_name}] Бот запросил подписку на канал — выполняю авто-подписку...")
+                await self._satisfy_join_gate(client, msg_obj, account.display_name)
+                reply, msg_obj = await self._send_and_wait_message(client, bot_entity, "/checkin")
+
             parsed: ParsedBotResponse = parse_checkin_reply(reply)
 
             # If the bot was stuck waiting for a SheerID link or giftcode, cancel and retry /checkin once
