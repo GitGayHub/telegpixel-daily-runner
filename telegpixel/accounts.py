@@ -30,6 +30,9 @@ class AccountRecord:
     first_name: str = ""
     phone: str = ""
     enabled: bool = True
+    device_model: str = "Desktop"
+    system_version: str = "Windows 10"
+    app_version: str = "5.8.3 x64"
     # Runtime telemetry (persisted in state.json without sessions)
     balance: Optional[int] = None
     usd_value: Optional[float] = None
@@ -62,6 +65,9 @@ class AccountRecord:
             "phone": self.phone,
             "session": self.session,
             "enabled": self.enabled,
+            "device_model": self.device_model,
+            "system_version": self.system_version,
+            "app_version": self.app_version,
         }
 
     def to_public_state_dict(self) -> Dict[str, Any]:
@@ -166,6 +172,9 @@ class AccountManager:
                 first_name=str(item.get("first_name") or st.get("first_name") or ""),
                 phone=str(item.get("phone") or ""),
                 enabled=bool(item.get("enabled", True)),
+                device_model=str(item.get("device_model") or "Desktop"),
+                system_version=str(item.get("system_version") or "Windows 10"),
+                app_version=str(item.get("app_version") or "5.8.3 x64"),
                 balance=st.get("balance", item.get("balance")),
                 usd_value=st.get("usd_value", item.get("usd_value")),
                 streak_days=st.get("streak_days", item.get("streak_days")),

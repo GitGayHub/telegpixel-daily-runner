@@ -342,10 +342,10 @@ def cmd_add_account(method: Optional[str], no_sync: bool) -> None:
 @click.option("--password", "default_2fa", default=None, help="Облачный пароль 2FA (если одинаковый).")
 @click.option(
     "--method",
-    type=click.Choice(["phone", "qr"], case_sensitive=False),
-    default="phone",
+    type=click.Choice(["qr", "phone"], case_sensitive=False),
+    default="qr",
     show_default=True,
-    help="Способ перепривязки без AyuGram: phone (код на аккаунт) или qr (скан с телефона).",
+    help="Способ перепривязки без AyuGram: qr (скан с телефона — без антифрод-киков) или phone (код).",
 )
 @click.option("--no-sync", is_flag=True, help="Не синхронизировать секреты в GitHub автоматически.")
 def cmd_reauth(reauth_all: bool, default_2fa: Optional[str], method: str, no_sync: bool) -> None:
@@ -410,7 +410,17 @@ def cmd_reauth(reauth_all: bool, default_2fa: Optional[str], method: str, no_syn
             phone_str = click.prompt(f"Введите номер телефона для {acc.display_name} (+380... / +49...)").strip()
 
         if use_method == "qr":
-            rec = asyncio.run(login_account_via_qr(password_provider=prompt_2fa, print_fn=console.print))
+            console.print(
+                f"📱 Возьмите телефон с аккаунтом [bold]{acc.display_name}[/bold] "
+                f"({phone_str or acc.user_id}) и отсканируйте QR:"
+            )
+            rec = asyncio.run(
+                login_account_via_qr(
+                    password_provider=prompt_2fa,
+                    print_fn=console.print,
+                    seed=phone_str or str(acc.user_id),
+                )
+            )
         else:
             console.print(f"📲 Отправляю код подтверждения на [bold]{phone_str}[/bold]...")
             rec = asyncio.run(

@@ -58,7 +58,7 @@ class CheckinRunner:
         api_hash: Optional[str] = None,
         target_bot: Optional[str] = None,
         reply_timeout: float = 22.0,
-        inter_account_delay: float = 2.0,
+        inter_account_delay: float = 4.5,
     ) -> None:
         self.api_id = int(api_id or os.getenv("TELEGRAM_API_ID") or DEFAULT_API_ID)
         self.api_hash = str(api_hash or os.getenv("TELEGRAM_API_HASH") or DEFAULT_API_HASH).strip()
@@ -169,9 +169,9 @@ class CheckinRunner:
             session=StringSession(account.session),
             api_id=self.api_id,
             api_hash=self.api_hash,
-            device_model=DESKTOP_DEVICE_MODEL,
-            system_version=DESKTOP_SYSTEM_VERSION,
-            app_version=DESKTOP_APP_VERSION,
+            device_model=account.device_model or DESKTOP_DEVICE_MODEL,
+            system_version=account.system_version or DESKTOP_SYSTEM_VERSION,
+            app_version=account.app_version or DESKTOP_APP_VERSION,
             lang_code="en",
             system_lang_code="en-US",
             receive_updates=False,
@@ -191,14 +191,16 @@ class CheckinRunner:
                     error_message=err,
                 )
 
-            me = await client.get_me()
-            if me:
-                account.user_id = me.id
-                if me.username:
-                    account.username = me.username
-                if me.first_name:
-                    account.first_name = me.first_name.strip()
+            if not account.user_id or account.username.startswith("id"):
+                me = await client.get_me()
+                if me:
+                    account.user_id = me.id
+                    if me.username:
+                        account.username = me.username
+                    if me.first_name:
+                        account.first_name = me.first_name.strip()
 
+            await asyncio.sleep(1.2)
             bot_entity = await client.get_entity(self.target_bot)
 
             if dry_run or stats_only:

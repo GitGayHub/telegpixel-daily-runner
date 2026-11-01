@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -47,19 +48,39 @@ DC_ADDRESSES = {
 }
 
 
+REALISTIC_PC_PROFILES: List[Tuple[str, str, str]] = [
+    ("ASUS System Product Name", "Windows 10 x64", "5.8.3 x64"),
+    ("MS-7C91", "Windows 10 x64", "5.8.3 x64"),
+    ("LENOVO 82FG", "Windows 11 x64", "5.8.3 x64"),
+    ("HP Pavilion Laptop 15", "Windows 11 x64", "5.8.3 x64"),
+    ("Gigabyte B550M DS3H", "Windows 10 x64", "5.8.3 x64"),
+    ("Dell XPS 15 9520", "Windows 11 x64", "5.8.3 x64"),
+]
+
+
+def select_hardware_profile(seed: str) -> Tuple[str, str, str]:
+    """Deterministically select a realistic Windows OEM profile per account seed."""
+    digest = hashlib.sha256((seed or "default").encode("utf-8")).digest()
+    idx = int.from_bytes(digest[:4], "big") % len(REALISTIC_PC_PROFILES)
+    return REALISTIC_PC_PROFILES[idx]
+
+
 def _make_desktop_client(
     session: object,
     api_id: int = DEFAULT_API_ID,
     api_hash: str = DEFAULT_API_HASH,
     receive_updates: bool = False,
+    device_model: Optional[str] = None,
+    system_version: Optional[str] = None,
+    app_version: Optional[str] = None,
 ) -> TelegramClient:
     return TelegramClient(
         session=session,
         api_id=api_id,
         api_hash=api_hash,
-        device_model=DESKTOP_DEVICE_MODEL,
-        system_version=DESKTOP_SYSTEM_VERSION,
-        app_version=DESKTOP_APP_VERSION,
+        device_model=device_model or DESKTOP_DEVICE_MODEL,
+        system_version=system_version or DESKTOP_SYSTEM_VERSION,
+        app_version=app_version or DESKTOP_APP_VERSION,
         lang_code="en",
         system_lang_code="en-US",
         receive_updates=receive_updates,
@@ -84,6 +105,9 @@ async def check_session_authorized(
         api_id=api_id,
         api_hash=api_hash,
         receive_updates=False,
+        device_model=account.device_model,
+        system_version=account.system_version,
+        app_version=account.app_version,
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=15.0)
@@ -462,35 +486,50 @@ async def login_account_via_qr(
     print_fn: Callable[[str], None] = print,
     api_id: int = DEFAULT_API_ID,
     api_hash: str = DEFAULT_API_HASH,
+    seed: Optional[str] = None,
 ) -> Optional[AccountRecord]:
     """Interactive QR login from phone (Telegram -> Settings -> Devices -> Link Desktop Device)."""
+    dev_model, sys_ver, app_ver = select_hardware_profile(seed or os.urandom(4).hex())
     client = _make_desktop_client(
         session=StringSession(),
         api_id=api_id,
         api_hash=api_hash,
         receive_updates=True,
+        device_model=dev_model,
+        system_version=sys_ver,
+        app_version=app_ver,
     )
     await client.connect()
     try:
         qr = await client.qr_login()
-        print_fn("\n📱 Откройте Telegram на ТЕЛЕФОНЕ -> Настройки -> Устройства -> Подключить устройство:")
-        print_fn(render_ascii_qr(qr.url))
-        print_fn("⏳ Ожидание сканирования QR-кода (90 сек)...")
-        try:
-            user = await qr.wait(timeout=90)
-        except errors.SessionPasswordNeededError:
-            user = None
-            for _ in range(3):
-                pwd = password_provider("QR-аккаунт")
-                if not pwd:
-                    return None
-                try:
-                    user = await client.sign_in(password=pwd)
-                    break
-                except errors.PasswordHashInvalidError:
-                    print_fn("⚠️ Неверный облачный 2FA-пароль, попробуйте ещё раз.")
-            if user is None:
-                return None
+        user = None
+        for attempt in range(3):
+            if attempt > 0:
+                await qr.recreate()
+                print_fn("\n🔄 Обновлён QR-код (предыдущий истёк):")
+            else:
+                print_fn("\n📱 Откройте Telegram на ТЕЛЕФОНЕ -> Настройки -> Устройства -> Подключить устройство:")
+            print_fn(render_ascii_qr(qr.url))
+            print_fn("⏳ Ожидание сканирования QR-кода с телефона...")
+            try:
+                user = await qr.wait(timeout=30)
+                break
+            except asyncio.TimeoutError:
+                continue
+            except errors.SessionPasswordNeededError:
+                for _ in range(3):
+                    pwd = password_provider("QR-аккаунт")
+                    if not pwd:
+                        return None
+                    try:
+                        user = await client.sign_in(password=pwd)
+                        break
+                    except errors.PasswordHashInvalidError:
+                        print_fn("⚠️ Неверный облачный 2FA-пароль, попробуйте ещё раз.")
+                break
+
+        if user is None:
+            return None
 
         session_str = client.session.save()
         return AccountRecord(
@@ -500,6 +539,9 @@ async def login_account_via_qr(
             first_name=(user.first_name or "").strip(),
             phone=user.phone or "",
             enabled=True,
+            device_model=dev_model,
+            system_version=sys_ver,
+            app_version=app_ver,
         )
     finally:
         await client.disconnect()
@@ -514,11 +556,15 @@ async def login_account_via_phone(
 ) -> Optional[AccountRecord]:
     """Interactive phone + Telegram/SMS code login (creates a standalone root session)."""
     norm_phone = normalize_phone(phone)
+    dev_model, sys_ver, app_ver = select_hardware_profile(norm_phone)
     client = _make_desktop_client(
         session=StringSession(),
         api_id=api_id,
         api_hash=api_hash,
         receive_updates=False,
+        device_model=dev_model,
+        system_version=sys_ver,
+        app_version=app_ver,
     )
     await client.connect()
     try:
@@ -548,6 +594,9 @@ async def login_account_via_phone(
             first_name=(user.first_name or "").strip(),
             phone=user.phone or norm_phone.lstrip("+"),
             enabled=True,
+            device_model=dev_model,
+            system_version=sys_ver,
+            app_version=app_ver,
         )
     finally:
         await client.disconnect()
@@ -574,11 +623,15 @@ async def send_login_code(
     if not norm_phone:
         raise ValueError("Некорректный номер телефона.")
 
+    dev_model, sys_ver, app_ver = select_hardware_profile(norm_phone)
     client = _make_desktop_client(
         session=StringSession(),
         api_id=api_id,
         api_hash=api_hash,
         receive_updates=False,
+        device_model=dev_model,
+        system_version=sys_ver,
+        app_version=app_ver,
     )
     await client.connect()
     try:
@@ -587,6 +640,9 @@ async def send_login_code(
             "phone": norm_phone,
             "phone_code_hash": sent.phone_code_hash,
             "session": client.session.save(),
+            "device_model": dev_model,
+            "system_version": sys_ver,
+            "app_version": app_ver,
         }
         _pending_auth_file(norm_phone, pending_dir).write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
@@ -617,11 +673,17 @@ async def complete_login_code(
         )
 
     state = json.loads(pfile.read_text(encoding="utf-8"))
+    dev_model = state.get("device_model") or DESKTOP_DEVICE_MODEL
+    sys_ver = state.get("system_version") or DESKTOP_SYSTEM_VERSION
+    app_ver = state.get("app_version") or DESKTOP_APP_VERSION
     client = _make_desktop_client(
         session=StringSession(state["session"]),
         api_id=api_id,
         api_hash=api_hash,
         receive_updates=False,
+        device_model=dev_model,
+        system_version=sys_ver,
+        app_version=app_ver,
     )
     await client.connect()
     try:
@@ -648,6 +710,9 @@ async def complete_login_code(
             first_name=(user.first_name or "").strip(),
             phone=user.phone or norm_phone.lstrip("+"),
             enabled=True,
+            device_model=dev_model,
+            system_version=sys_ver,
+            app_version=app_ver,
         )
     finally:
         await client.disconnect()
