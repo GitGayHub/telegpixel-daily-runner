@@ -338,6 +338,7 @@ def cmd_add_account(method: Optional[str], no_sync: bool) -> None:
 
 
 @cli.command("reauth")
+@click.option("--all", "reauth_all", is_flag=True, help="Перепривязать ВСЕ аккаунты напрямую (независимо от ПК/AyuGram).")
 @click.option("--password", "default_2fa", default=None, help="Облачный пароль 2FA (если одинаковый).")
 @click.option(
     "--method",
@@ -347,8 +348,8 @@ def cmd_add_account(method: Optional[str], no_sync: bool) -> None:
     help="Способ перепривязки без AyuGram: phone (код на аккаунт) или qr (скан с телефона).",
 )
 @click.option("--no-sync", is_flag=True, help="Не синхронизировать секреты в GitHub автоматически.")
-def cmd_reauth(default_2fa: Optional[str], method: str, no_sync: bool) -> None:
-    """Проверить все сессии и переподключить слетевшие аккаунты напрямую (без AyuGram)."""
+def cmd_reauth(reauth_all: bool, default_2fa: Optional[str], method: str, no_sync: bool) -> None:
+    """Проверить сессии и переподключить аккаунты напрямую (без привязки к ПК/AyuGram)."""
     from telegpixel.ayugram_importer import (
         check_session_authorized,
         login_account_via_phone,
@@ -361,24 +362,28 @@ def cmd_reauth(default_2fa: Optional[str], method: str, no_sync: bool) -> None:
         console.print("[yellow]⚠️ Нет аккаунтов в data/accounts.json.[/yellow]")
         return
 
-    console.print("[bold cyan]🔍 Проверка активности сессий всех аккаунтов...[/bold cyan]")
+    if reauth_all:
+        expired = list(accounts)
+        console.print(f"[bold cyan]🔄 Режим полной перепривязки всех {len(expired)} аккаунтов напрямую (без ПК)...[/bold cyan]")
+    else:
+        console.print("[bold cyan]🔍 Проверка активности сессий всех аккаунтов...[/bold cyan]")
 
-    async def _check_all() -> list[AccountRecord]:
-        expired_list: list[AccountRecord] = []
-        for acc in accounts:
-            alive = await check_session_authorized(acc)
-            if alive:
-                console.print(f"  [bold green]✅ {acc.display_name}[/bold green] — сессия активна")
-            else:
-                phone_hint = f" (+{acc.phone.lstrip('+')})" if acc.phone else ""
-                console.print(f"  [bold red]❌ {acc.display_name}{phone_hint}[/bold red] — сессия сброшена")
-                expired_list.append(acc)
-        return expired_list
+        async def _check_all() -> list[AccountRecord]:
+            expired_list: list[AccountRecord] = []
+            for acc in accounts:
+                alive = await check_session_authorized(acc)
+                if alive:
+                    console.print(f"  [bold green]✅ {acc.display_name}[/bold green] — сессия активна")
+                else:
+                    phone_hint = f" (+{acc.phone.lstrip('+')})" if acc.phone else ""
+                    console.print(f"  [bold red]❌ {acc.display_name}{phone_hint}[/bold red] — сессия сброшена")
+                    expired_list.append(acc)
+            return expired_list
 
-    expired = asyncio.run(_check_all())
-    if not expired:
-        console.print("\n[bold green]🎉 Все аккаунты активны! Перепривязка не требуется.[/bold green]")
-        return
+        expired = asyncio.run(_check_all())
+        if not expired:
+            console.print("\n[bold green]🎉 Все аккаунты активны! Перепривязка не требуется.[/bold green]")
+            return
 
     console.print(
         f"\n[bold yellow]⚡ Найдено слетевших аккаунтов: {len(expired)}. "
