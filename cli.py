@@ -219,7 +219,7 @@ def cmd_stats(cached: bool, no_telegram: bool) -> None:
 def cmd_list_accounts() -> None:
     """Показать список подключённых Telegram-аккаунтов."""
     mgr = AccountManager()
-    accounts = mgr.list_accounts(enabled_only=False)
+    accounts = mgr.list_accounts(enabled_only=not reauth_all)
     if not accounts:
         console.print("[yellow]Список аккаунтов пуст.[/yellow]")
         return
@@ -364,7 +364,7 @@ def cmd_reauth(reauth_all: bool, default_2fa: Optional[str], method: str, no_syn
     )
 
     mgr = AccountManager()
-    accounts = mgr.list_accounts(enabled_only=False)
+    accounts = mgr.list_accounts(enabled_only=not reauth_all)
     if not accounts:
         console.print("[yellow]⚠️ Нет аккаунтов в data/accounts.json.[/yellow]")
         return
