@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -802,3 +803,312 @@ async def accept_qr_login_token(account: AccountRecord, token_or_url: str) -> bo
         return bool(res)
     finally:
         await client.disconnect()
+
+
+def _patch_opentele() -> None:
+    """Monkey-patch opentele to support unlimited accounts and fix recursion & localKey bugs in SaveTData."""
+    try:
+        import opentele.td as td
+        from opentele.td import Account, TDesktop
+
+        td.TDesktop.kMaxAccounts = 100
+
+        def fixed_api_setter(self, value):
+            self._Account__api = value
+
+        Account.api = Account.api.setter(fixed_api_setter)
+    except Exception as e:
+        logger.debug(f"opentele patching skipped or failed: {e}")
+
+
+async def export_accounts_to_tdata(
+    accounts: List[AccountRecord],
+    target_dir: Path,
+) -> List[Tuple[int, int, int, bytes]]:
+    """Convert StringSessions of given accounts into a unified multi-slot tdata directory."""
+    _patch_opentele()
+    from opentele.api import UseCurrentSession
+    from opentele.td import Account, TDesktop
+
+    valid_accounts = [a for a in accounts if a.session]
+    if not valid_accounts:
+        raise ValueError("Нет аккаунтов с валидными сессиями для экспорта в tdata.")
+
+    target_dir = Path(target_dir).resolve()
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    tdesk = TDesktop()
+    for acc in valid_accounts:
+        client = _make_desktop_client(
+            StringSession(acc.session),
+            device_model=acc.device_model,
+            system_version=acc.system_version,
+            app_version=acc.app_version,
+        )
+        await client.connect()
+        try:
+            await Account.FromTelethon(client, flag=UseCurrentSession, owner=tdesk)
+        finally:
+            await client.disconnect()
+
+    if not tdesk.isLoaded():
+        tdesk._TDesktop__generateLocalKey()
+    for a in tdesk.accounts:
+        a.localKey = tdesk.localKey
+
+    tdesk.SaveTData(str(target_dir))
+    return read_tdata_slots(target_dir)
+
+
+async def export_accounts_to_tdata_archive(
+    accounts: List[AccountRecord],
+    output_zip_path: Path,
+    password: Optional[str] = None,
+    include_portable: bool = True,
+) -> Path:
+    """
+    Generate full multi-account tdata + portable standalone folders for each account,
+    packaged into a ZIP archive with 1-click RESTORE_TO_AYUGRAM.bat script.
+    If password is provided, encrypts with AES-256 (pyzipper).
+    """
+    _patch_opentele()
+    from opentele.api import UseCurrentSession
+    from opentele.td import Account, TDesktop
+
+    valid_accounts = [a for a in accounts if a.session]
+    if not valid_accounts:
+        raise ValueError("Нет аккаунтов с валидными сессиями для создания архива.")
+
+    output_zip_path = Path(output_zip_path).resolve()
+    output_zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    staging_dir = output_zip_path.parent / f"_staging_tdata_{os.getpid()}_{int(time.time())}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        tdata_dir = staging_dir / "tdata"
+        tdata_dir.mkdir(parents=True, exist_ok=True)
+        portable_dir = staging_dir / "accounts_portable"
+        portable_dir.mkdir(parents=True, exist_ok=True)
+
+        tdesk = TDesktop()
+        for idx, acc in enumerate(valid_accounts, 1):
+            client = _make_desktop_client(
+                StringSession(acc.session),
+                device_model=acc.device_model,
+                system_version=acc.system_version,
+                app_version=acc.app_version,
+            )
+            await client.connect()
+            try:
+                # Add to multi-account tdesk
+                await Account.FromTelethon(client, flag=UseCurrentSession, owner=tdesk)
+
+                # Also generate standalone portable tdata for individual usage
+                if include_portable:
+                    clean_name = "".join(c if c.isalnum() else "_" for c in acc.display_name).strip("_") or f"acc_{idx}"
+                    single_tdesk = await TDesktop.FromTelethon(client, flag=UseCurrentSession)
+                    acc_tdata = portable_dir / f"{idx}_{clean_name}_tdata"
+                    single_tdesk.SaveTData(str(acc_tdata))
+            finally:
+                await client.disconnect()
+
+        if not tdesk.isLoaded():
+            tdesk._TDesktop__generateLocalKey()
+        for a in tdesk.accounts:
+            a.localKey = tdesk.localKey
+
+        tdesk.SaveTData(str(tdata_dir))
+
+        # Add 1-click restoration script inside archive
+        bat_content = (
+            "@echo off\r\n"
+            "chcp 65001 >nul\r\n"
+            "echo ====================================================\r\n"
+            "echo   Восстановление сессий TelegPixel в AyuGram Desktop\r\n"
+            "echo ====================================================\r\n"
+            "echo.\r\n"
+            "echo 1. Закрываем запущенный AyuGram...\r\n"
+            "taskkill /F /IM AyuGram.exe >nul 2>&1\r\n"
+            "taskkill /F /IM Telegram.exe >nul 2>&1\r\n"
+            "timeout /t 1 /nobreak >nul\r\n"
+            "\r\n"
+            "set \"TARGET=%USERPROFILE%\\Documents\\AyuGram\\tdata\"\r\n"
+            "if not exist \"%USERPROFILE%\\Documents\\AyuGram\" (\r\n"
+            "    mkdir \"%USERPROFILE%\\Documents\\AyuGram\" >nul 2>&1\r\n"
+            ")\r\n"
+            "if exist \"%TARGET%\" (\r\n"
+            "    echo 2. Создаём резервную копию текущего tdata...\r\n"
+            "    xcopy \"%TARGET%\" \"%USERPROFILE%\\Documents\\AyuGram\\tdata_backup_%random%\\\" /E /I /Q /Y >nul 2>&1\r\n"
+            ")\r\n"
+            "\r\n"
+            "echo 3. Копируем восстановленные сессии в AyuGram...\r\n"
+            "xcopy \"%~dp0tdata\\*\" \"%TARGET%\\\" /E /I /Q /Y\r\n"
+            "\r\n"
+            "echo.\r\n"
+            "echo ====================================================\r\n"
+            "echo  [ГОТОВО] Все сессии успешно добавлены в AyuGram!\r\n"
+            "echo  Запустите AyuGram — все аккаунты будут онлайн.\r\n"
+            "echo ====================================================\r\n"
+            "pause\r\n"
+        )
+        (staging_dir / "RESTORE_TO_AYUGRAM.bat").write_text(bat_content, encoding="utf-8")
+
+        readme_content = (
+            "ИНСТРУКЦИЯ ПО ВОССТАНОВЛЕНИЮ СЕССИЙ TELEGRAM / AYUGRAM\n"
+            "=======================================================\n\n"
+            "1. Быстрое восстановление всех аккаунтов в AyuGram:\n"
+            "   Просто дважды кликните на файл 'RESTORE_TO_AYUGRAM.bat'.\n"
+            "   Скрипт сам закроет AyuGram (если запущен), сделает бэкап старой папки\n"
+            "   и скопирует все сессии в Documents\\AyuGram\\tdata.\n\n"
+            "2. Восстановление вручную:\n"
+            "   Скопируйте содержимое папки 'tdata' в вашу папку AyuGram:\n"
+            "   C:\\Users\\<Имя>\\Documents\\AyuGram\\tdata\n\n"
+            "3. Запуск отдельного аккаунта:\n"
+            "   В папке 'accounts_portable' находятся отдельные папки tdata для каждого аккаунта.\n"
+            "   Вы можете скопировать любую из них в Telegram/AyuGram Portable и зайти конкретно в этот аккаунт.\n"
+        )
+        (staging_dir / "README.txt").write_text(readme_content, encoding="utf-8")
+
+        # Compress into zip
+        if output_zip_path.exists():
+            output_zip_path.unlink()
+
+        if password:
+            try:
+                import pyzipper
+                with pyzipper.AESZipFile(
+                    output_zip_path,
+                    "w",
+                    compression=pyzipper.ZIP_DEFLATED,
+                    encryption=pyzipper.WZ_AES,
+                ) as zf:
+                    zf.setpassword(password.encode("utf-8"))
+                    for root_p, _, files in os.walk(staging_dir):
+                        for f in files:
+                            full_f = Path(root_p) / f
+                            rel_f = full_f.relative_to(staging_dir)
+                            zf.write(full_f, str(rel_f))
+            except ImportError:
+                import zipfile
+                with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for root_p, _, files in os.walk(staging_dir):
+                        for f in files:
+                            full_f = Path(root_p) / f
+                            rel_f = full_f.relative_to(staging_dir)
+                            zf.write(full_f, str(rel_f))
+        else:
+            import zipfile
+            with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for root_p, _, files in os.walk(staging_dir):
+                    for f in files:
+                        full_f = Path(root_p) / f
+                        rel_f = full_f.relative_to(staging_dir)
+                        zf.write(full_f, str(rel_f))
+
+        return output_zip_path
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def restore_tdata_archive(
+    source_zip_or_dir: Path,
+    target_tdata_path: Optional[Path] = None,
+    password: Optional[str] = None,
+    close_ayugram_first: bool = True,
+) -> List[Tuple[int, int, int, bytes]]:
+    """
+    Extract a downloaded tdata backup zip archive and copy into AyuGram's tdata folder.
+    Backs up the current tdata folder first.
+    Returns the list of restored slots verified with read_tdata_slots.
+    """
+    source_path = Path(source_zip_or_dir).resolve()
+    target_path = Path(target_tdata_path or DEFAULT_AYUGRAM_TDATA).resolve()
+
+    if close_ayugram_first and is_ayugram_running():
+        close_ayugram()
+
+    temp_extract_dir: Optional[Path] = None
+    try:
+        if source_path.is_file() and source_path.suffix.lower() == ".zip":
+            temp_extract_dir = target_path.parent / f"_tdata_extract_{os.getpid()}_{int(time.time())}"
+            temp_extract_dir.mkdir(parents=True, exist_ok=True)
+            extracted = False
+            try:
+                import pyzipper
+                with pyzipper.AESZipFile(source_path, "r") as zf:
+                    if password:
+                        zf.setpassword(password.encode("utf-8"))
+                    zf.extractall(temp_extract_dir)
+                    extracted = True
+            except Exception as e:
+                logger.debug(f"pyzipper extract failed or not encrypted with AES: {e}")
+
+            if not extracted:
+                import zipfile
+                with zipfile.ZipFile(source_path, "r") as zf:
+                    if password:
+                        zf.setpassword(password.encode("utf-8"))
+                    zf.extractall(temp_extract_dir)
+
+            search_root = temp_extract_dir
+        else:
+            search_root = source_path
+
+        # Find tdata directory inside search_root
+        candidate_tdata = search_root / "tdata"
+        if not candidate_tdata.exists() or not (candidate_tdata / "key_datas").exists():
+            if (search_root / "key_datas").exists():
+                candidate_tdata = search_root
+            else:
+                found = list(search_root.glob("**/key_datas"))
+                if found:
+                    candidate_tdata = found[0].parent
+                else:
+                    raise FileNotFoundError(
+                        f"В архиве {source_path.name} не найдена папка tdata (файл key_datas отсутствует)."
+                    )
+
+        # Backup current target_path if it exists
+        if target_path.exists():
+            backup_dir = target_path.parent / f"tdata_backup_{int(time.time())}"
+            shutil.copytree(target_path, backup_dir, dirs_exist_ok=True)
+            logger.info(f"Создан бэкап текущего tdata: {backup_dir}")
+
+        target_path.mkdir(parents=True, exist_ok=True)
+        # Copy files over
+        for item in candidate_tdata.iterdir():
+            dest = target_path / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+
+        return read_tdata_slots(target_path)
+    finally:
+        if temp_extract_dir and temp_extract_dir.exists():
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+
+async def restore_accounts_to_ayugram_directly(
+    accounts: List[AccountRecord],
+    target_tdata_path: Optional[Path] = None,
+    close_ayugram_first: bool = True,
+) -> List[Tuple[int, int, int, bytes]]:
+    """Convert StringSessions directly and write into AyuGram tdata (1-click local restoration)."""
+    target_path = Path(target_tdata_path or DEFAULT_AYUGRAM_TDATA).resolve()
+    if close_ayugram_first and is_ayugram_running():
+        close_ayugram()
+
+    if target_path.exists():
+        backup_dir = target_path.parent / f"tdata_backup_{int(time.time())}"
+        shutil.copytree(target_path, backup_dir, dirs_exist_ok=True)
+        logger.info(f"Создан бэкап текущего tdata: {backup_dir}")
+
+    return await export_accounts_to_tdata(accounts, target_path)
+

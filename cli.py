@@ -725,17 +725,141 @@ def cmd_qr_login(target: str, token_or_url: str) -> None:
         console.print(f"[red]❌ Ошибка QR-входа: {e}[/red]")
 
 
+@cli.command("export-tdata")
+@click.option("-o", "--output", "output_path", default="data/ayugram_sessions_backup.zip", show_default=True, help="Путь к результирующему ZIP-архиву.")
+@click.option("-p", "--password", default=None, help="Пароль для AES-256 шифрования архива (по умолчанию без пароля).")
+@click.option("--send-telegram", is_flag=True, help="Отправить готовый архив в Telegram-бот.")
+@click.option("--no-portable", is_flag=True, help="Не генерировать отдельные portable папки для каждого аккаунта.")
+def cmd_export_tdata(output_path: str, password: Optional[str], send_telegram: bool, no_portable: bool) -> None:
+    """Экспортировать сессии в готовый архив для AyuGram со скриптом 1-клик восстановления."""
+    import html
+    from telegpixel.ayugram_importer import export_accounts_to_tdata_archive
+
+    mgr = AccountManager()
+    accounts = mgr.list_accounts(enabled_only=True)
+    if not accounts:
+        console.print("[red]❌ Нет активных аккаунтов для экспорта![/red]")
+        sys.exit(1)
+
+    out_file = Path(output_path)
+    console.print(f"[cyan]📦 Генерация tdata и упаковка архива ({len(accounts)} аккаунтов)...[/cyan]")
+    res_path = asyncio.run(
+        export_accounts_to_tdata_archive(
+            accounts,
+            out_file,
+            password=password,
+            include_portable=not no_portable,
+        )
+    )
+    console.print(f"[bold green]✅ Готовый архив сессий создан: {res_path} ({res_path.stat().st_size} байт)[/bold green]")
+    console.print("[dim]В архиве: папка 'tdata' со всеми аккаунтами + скрипт 'RESTORE_TO_AYUGRAM.bat' для 1 клика.[/dim]")
+
+    if send_telegram:
+        console.print("[cyan]📤 Отправка архива в личный Telegram...[/cyan]")
+        notifier = TelegramNotifier()
+        caption = (
+            "📦 <b>Готовый архив сессий Telegram / AyuGram</b>\n\n"
+            f"👥 Аккаунтов в архиве: <b>{len(accounts)}</b>\n\n"
+            "💡 <b>Как применить на ПК:</b>\n"
+            "1. Распакуйте архив.\n"
+            "2. Запустите <code>RESTORE_TO_AYUGRAM.bat</code> — все аккаунты сразу откроются в AyuGram!\n"
+            + (f"\n🔑 Пароль архива: <code>{html.escape(password)}</code>" if password else "\n🔓 Без пароля (личная доставка).")
+        )
+        ok = notifier.send_document(res_path, caption=caption)
+        if ok:
+            console.print("[bold green]✅ Архив успешно отправлен в Telegram![/bold green]")
+        else:
+            console.print("[yellow]⚠️ Не удалось отправить документ в Telegram (проверьте TELEGPIXEL_CHAT_ID).[/yellow]")
+
+
+@cli.command("restore-tdata")
+@click.option("-i", "--input", "input_file", default=None, help="Путь к ZIP архиву (если не указан, восстановит напрямую из data/accounts.json).")
+@click.option(
+    "-t",
+    "--target-dir",
+    default=str(Path.home() / "Documents" / "AyuGram" / "tdata"),
+    show_default=True,
+    help="Куда записать сессии AyuGram.",
+)
+@click.option("-p", "--password", default=None, help="Пароль для расшифровки архива.")
+@click.option("--close-ayugram", "auto_close", is_flag=True, default=True, help="Автоматически закрыть AyuGram перед записью.")
+def cmd_restore_tdata(
+    input_file: Optional[str],
+    target_dir: str,
+    password: Optional[str],
+    auto_close: bool,
+) -> None:
+    """Восстановить сессии всех аккаунтов в AyuGram (из архива или напрямую из accounts.json)."""
+    from telegpixel.ayugram_importer import (
+        close_ayugram,
+        is_ayugram_running,
+        restore_accounts_to_ayugram_directly,
+        restore_tdata_archive,
+    )
+
+    tpath = Path(target_dir)
+
+    if is_ayugram_running():
+        if auto_close or click.confirm("AyuGram сейчас запущен. Закрыть его для безопасного восстановления?", default=True):
+            close_ayugram()
+        else:
+            console.print("[red]Отменено: сначала закройте AyuGram.[/red]")
+            return
+
+    if input_file:
+        in_path = Path(input_file)
+        if not in_path.exists():
+            console.print(f"[red]❌ Файл не найден: {in_path}[/red]")
+            sys.exit(1)
+        console.print(f"[cyan]📂 Восстановление сессий из архива {in_path.name}...[/cyan]")
+        slots = restore_tdata_archive(
+            in_path,
+            target_tdata_path=tpath,
+            password=password,
+            close_ayugram_first=False,
+        )
+    else:
+        console.print("[cyan]📂 Прямое восстановление всех сессий из data/accounts.json в AyuGram...[/cyan]")
+        mgr = AccountManager()
+        accounts = mgr.list_accounts(enabled_only=True)
+        if not accounts:
+            console.print("[red]❌ В data/accounts.json нет активных аккаунтов![/red]")
+            sys.exit(1)
+        slots = asyncio.run(
+            restore_accounts_to_ayugram_directly(
+                accounts,
+                target_tdata_path=tpath,
+                close_ayugram_first=False,
+            )
+        )
+
+    console.print(f"[bold green]✅ Успешно восстановлено в AyuGram активных аккаунтов: {len(slots)}[/bold green]")
+    for s_idx, uid, dc, _ in slots:
+        console.print(f"  • Слот #{s_idx}: [bold]User ID {uid}[/bold] (DC{dc})")
+    console.print("\n[bold cyan]🎉 Готово! Теперь запустите AyuGram — все аккаунты появятся автоматически.[/bold cyan]")
+
+
 @cli.command("backup")
 @click.option("--send-telegram", is_flag=True, help="Отправить файл бэкапа и сводку в Telegram-бот.")
-def cmd_backup(send_telegram: bool) -> None:
+@click.option("--export-tdata", is_flag=True, help="Также экспортировать готовый архив tdata для AyuGram.")
+def cmd_backup(send_telegram: bool, export_tdata: bool) -> None:
     """Создать локальный бэкап всех аккаунтов и сессий."""
     import html
+    from telegpixel.ayugram_importer import export_accounts_to_tdata_archive
+
     mgr = AccountManager()
     accounts = mgr.list_accounts(enabled_only=True)
     export_data = mgr.export_secret_json()
     out_file = PROJECT_ROOT / "data" / "accounts_backup.json"
     out_file.write_text(export_data, encoding="utf-8")
     console.print(f"[bold green]✅ Бэкап всех {len(accounts)} аккаунтов сохранён в {out_file}[/bold green]")
+
+    tdata_zip = None
+    if export_tdata:
+        tdata_zip = PROJECT_ROOT / "data" / "ayugram_sessions_backup.zip"
+        console.print("[cyan]📦 Экспорт tdata архива для AyuGram...[/cyan]")
+        asyncio.run(export_accounts_to_tdata_archive(accounts, tdata_zip))
+        console.print(f"[bold green]✅ Архив tdata сохранён: {tdata_zip}[/bold green]")
 
     if send_telegram:
         notifier = TelegramNotifier()
@@ -746,8 +870,14 @@ def cmd_backup(send_telegram: bool) -> None:
         for i, a in enumerate(accounts, 1):
             lines.append(f"{i}. <b>{html.escape(a.display_name)}</b> (+{a.phone.lstrip('+')})")
         lines.append("\n💡 <i>Сессии надёжно сохранены в GitHub Secrets и зашифрованном кэше.</i>")
-        lines.append("<i>При потере SIM-карты запустите /code <аккаунт> или используйте QR-вход.</i>")
+        lines.append("<i>Для получения готового архива AyuGram напишите /tdata боту.</i>")
         notifier.send_message("\n".join(lines))
+
+        if tdata_zip and tdata_zip.exists():
+            notifier.send_document(
+                tdata_zip,
+                caption="📦 <b>Архив AyuGram tdata со всеми сессиями</b>",
+            )
 
 
 if __name__ == "__main__":

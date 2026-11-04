@@ -207,3 +207,47 @@ def test_fetch_telegram_service_code_mock():
         code, dt, full_text = res
         assert code == "77123"
         assert "77123" in full_text
+
+
+def test_send_document_mock(tmp_path: Path):
+    from unittest.mock import patch, MagicMock
+    doc_file = tmp_path / "test_doc.zip"
+    doc_file.write_bytes(b"PK0304dummy")
+    notifier = TelegramNotifier(bot_token="test_tok", chat_id="12345")
+
+    with patch("requests.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ok": True}
+        mock_post.return_value = mock_resp
+
+        ok = notifier.send_document(doc_file, caption="Test caption")
+        assert ok is True
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert "sendDocument" in args[0]
+        assert kwargs["data"]["chat_id"] == "12345"
+        assert kwargs["data"]["caption"] == "Test caption"
+
+
+def test_restore_tdata_archive_extract(tmp_path: Path):
+    import zipfile
+    from unittest.mock import patch
+    from telegpixel.ayugram_importer import restore_tdata_archive
+
+    # Create dummy archive
+    src_zip = tmp_path / "backup.zip"
+    with zipfile.ZipFile(src_zip, "w") as zf:
+        zf.writestr("tdata/key_datas", b"TDF$\x01\x00\x00\x00dummy")
+        zf.writestr("tdata/D877F783D5D3EF8Cs", b"mtp_dummy")
+
+    target_dir = tmp_path / "ayugram_target"
+
+    with patch("telegpixel.ayugram_importer.read_tdata_slots") as mock_read:
+        mock_read.return_value = [(0, 123456, 2, b"key"*64)]
+        slots = restore_tdata_archive(src_zip, target_tdata_path=target_dir, close_ayugram_first=False)
+        assert len(slots) == 1
+        assert slots[0][1] == 123456
+        assert (target_dir / "key_datas").exists()
+        assert (target_dir / "D877F783D5D3EF8Cs").exists()
+

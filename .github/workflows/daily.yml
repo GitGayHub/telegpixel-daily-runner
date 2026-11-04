@@ -7,16 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Действие: run (/checkin + отчёт), stats (баланс /me), backup (отправить бэкап в бот), get-code (код входа)'
+        description: 'Действие: run (/checkin + отчёт), stats (баланс /me), backup (отправить бэкап в бот), get-code (код входа), export-tdata (архив для AyuGram)'
         type: choice
         options:
           - run
           - stats
           - backup
           - get-code
+          - export-tdata
         default: run
       target_account:
         description: 'Для get-code: имя или номер аккаунта (например Jamal или +49...)'
+        required: false
+        default: ''
+      password:
+        description: 'Пароль для шифрования архива tdata (по умолчанию TELEGPIXEL_DEFAULT_2FA)'
         required: false
         default: ''
       dry_run:
@@ -88,6 +93,9 @@ jobs:
             python cli.py backup --send-telegram
           elif [ "$ACTION" = "get-code" ]; then
             python cli.py get-code "${{ inputs.target_account }}"
+          elif [ "$ACTION" = "export-tdata" ]; then
+            PASS="${{ inputs.password || secrets.TELEGPIXEL_DEFAULT_2FA || 'ugIYgdGdiD8au0' }}"
+            python cli.py export-tdata --password "$PASS" --send-telegram
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python cli.py run --dry-run
           else
@@ -103,6 +111,15 @@ jobs:
             data/state.json
             data/telegram_bot_state.json
           key: telegpixel-state-${{ github.run_id }}
+
+      - name: Upload Encrypted TData Backup Artifact
+        if: ${{ (inputs.action == 'export-tdata' || inputs.action == 'backup') && always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ayugram-sessions-backup
+          path: data/ayugram_sessions_backup.zip
+          retention-days: 7
 
       - name: Send Failure Alert to Telegram
         if: failure()

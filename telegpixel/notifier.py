@@ -314,6 +314,51 @@ class TelegramNotifier:
             logger.error(f"Ошибка отправки в Telegram: {e}")
             return False
 
+    def send_document(
+        self,
+        file_path: Path | str,
+        caption: str = "",
+        target_chat: Optional[str] = None,
+    ) -> bool:
+        """Send a document or archive to Telegram chat."""
+        if not self.bot_token:
+            logger.warning("TELEGRAM_BOT_TOKEN не задан, отправка файла пропущена.")
+            return False
+        chat = target_chat or self.chat_id or self.auto_discover_chat_id()
+        if not chat:
+            logger.warning("TELEGRAM_CHAT_ID не задан, отправка файла пропущена.")
+            return False
+
+        path = Path(file_path).resolve()
+        if not path.exists():
+            logger.error(f"Файл для отправки не найден: {path}")
+            return False
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        data = {
+            "chat_id": chat,
+            "caption": caption[:1024],
+            "parse_mode": "HTML",
+        }
+        try:
+            with open(path, "rb") as f:
+                files = {"document": (path.name, f, "application/zip")}
+                resp = requests.post(
+                    url,
+                    data=data,
+                    files=files,
+                    headers={"User-Agent": STANDARD_USER_AGENT},
+                    timeout=60,
+                )
+            if resp.status_code == 200 and resp.json().get("ok"):
+                logger.info(f"Документ {path.name} успешно отправлен в Telegram (chat_id={chat}).")
+                return True
+            logger.error(f"Telegram API sendDocument error ({resp.status_code}): {resp.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка отправки файла в Telegram: {e}")
+            return False
+
     def process_pending_commands(self, accounts: List[AccountRecord]) -> None:
         """Reply to /start or /stats commands sent to @pixelfarmik143714bot."""
         if not self.bot_token:
@@ -414,6 +459,27 @@ class TelegramNotifier:
                                 f"а затем повторите запрос."
                             )
                         self.send_message(reply)
+                elif text.startswith(("/backup_tdata", "/export_tdata", "/tdata", "/download_tdata")):
+                    import asyncio
+                    from telegpixel.ayugram_importer import export_accounts_to_tdata_archive
+                    parts = (msg.get("text") or "").strip().split()
+                    pwd = parts[1] if len(parts) > 1 else None
+                    self.send_message("⏳ <i>Генерирую готовый архив сессий tdata для AyuGram... Пожалуйста, подождите 5-10 секунд.</i>")
+                    archive_path = PROJECT_ROOT / "data" / "ayugram_sessions_backup.zip"
+                    try:
+                        asyncio.run(export_accounts_to_tdata_archive(accounts, archive_path, password=pwd))
+                        caption = (
+                            "📦 <b>Готовый архив сессий Telegram / AyuGram</b>\n\n"
+                            f"👥 Аккаунтов в архиве: <b>{len(accounts)}</b>\n\n"
+                            "💡 <b>Как применить на ПК:</b>\n"
+                            "1. Скачайте и распакуйте архив.\n"
+                            "2. Запустите <code>RESTORE_TO_AYUGRAM.bat</code> — все аккаунты появятся в вашем AyuGram автоматически!\n"
+                            + (f"\n🔑 Пароль архива: <code>{html.escape(pwd)}</code>" if pwd else "\n🔓 Без пароля (личная доставка в чат).")
+                        )
+                        self.send_document(archive_path, caption=caption)
+                    except Exception as ex:
+                        logger.error(f"Failed to generate tdata archive: {ex}")
+                        self.send_message(f"❌ Ошибка генерации архива: {html.escape(str(ex))}")
                 elif text.startswith(("/backup", "/export")):
                     lines = [
                         "🔐 <b>Бэкап аккаунтов TelegPixel</b>",
@@ -421,8 +487,8 @@ class TelegramNotifier:
                     ]
                     for i, a in enumerate(accounts, 1):
                         lines.append(f"{i}. <b>{html.escape(a.display_name)}</b> (+{a.phone.lstrip('+')}) | <i>ID: {a.user_id}</i>")
-                    lines.append("\n💡 <i>Все сессии надёжно сохранены в GitHub Secrets. "
-                                 "Если потеряли SIM — используйте /code <аккаунт> или QR-вход!</i>")
+                    lines.append("\n💡 <i>Чтобы получить готовый файл для AyuGram прямо сюда, отправьте: /tdata</i>")
+                    lines.append("<i>Если потеряли SIM — используйте /code <аккаунт> или QR-вход!</i>")
                     self.send_message("\n".join(lines))
 
             self._save_bot_state({"last_update_id": max_upd_id})
