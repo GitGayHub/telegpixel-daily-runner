@@ -11,6 +11,7 @@ Local account import, standalone root login, and safe tdata detach utilities:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -721,5 +722,83 @@ async def complete_login_code(
             system_version=sys_ver,
             app_version=app_ver,
         )
+    finally:
+        await client.disconnect()
+
+
+async def fetch_telegram_service_code(
+    account: AccountRecord,
+    max_age_seconds: int = 1800,
+) -> Optional[Tuple[str, datetime, str]]:
+    """
+    Fetch the latest 5-digit Telegram service login code from chat 777000 (Telegram Notifications).
+    Allows logging into Telegram on phone or desktop even if the physical SIM card is lost!
+    """
+    client = _make_desktop_client(
+        StringSession(account.session),
+        device_model=account.device_model,
+        system_version=account.system_version,
+        app_version=account.app_version,
+    )
+    await client.connect()
+    try:
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        async for msg in client.iter_messages(777000, limit=8):
+            if not msg.text:
+                continue
+            if max_age_seconds > 0 and msg.date:
+                age = (now_utc - msg.date).total_seconds()
+                if age > max_age_seconds:
+                    continue
+            match = re.search(
+                r'(?:login code|код для входа|код подтверждения|код|code)\D*?(\d{5})',
+                msg.text,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1), msg.date, msg.text
+            all_digits = re.findall(r'\b\d{5}\b', msg.text)
+            if all_digits:
+                return all_digits[0], msg.date, msg.text
+        return None
+    finally:
+        await client.disconnect()
+
+
+async def accept_qr_login_token(account: AccountRecord, token_or_url: str) -> bool:
+    """
+    Accept a Telegram Desktop / Mobile QR login token (tg://login?token=...) using the account's
+    active cloud session. Instantly authorizes Telegram on a new device without SMS or codes!
+    """
+    import base64
+    import urllib.parse
+
+    raw = token_or_url.strip()
+    if "token=" in raw:
+        parsed = urllib.parse.urlparse(raw)
+        q = urllib.parse.parse_qs(parsed.query)
+        token_str = q.get("token", [""])[0]
+    else:
+        token_str = raw
+
+    if not token_str:
+        raise ValueError("Не передан token для QR-входа.")
+
+    rem = len(token_str) % 4
+    if rem:
+        token_str += "=" * (4 - rem)
+    token_bytes = base64.urlsafe_b64decode(token_str)
+
+    client = _make_desktop_client(
+        StringSession(account.session),
+        device_model=account.device_model,
+        system_version=account.system_version,
+        app_version=account.app_version,
+    )
+    await client.connect()
+    try:
+        res = await client(functions.auth.AcceptLoginTokenRequest(token=token_bytes))
+        return bool(res)
     finally:
         await client.disconnect()

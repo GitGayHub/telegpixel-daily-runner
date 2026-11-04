@@ -180,3 +180,30 @@ def test_normalize_phone():
     assert normalize_phone("15550109999") == "+15550109999"
     assert normalize_phone("+1 (555) 010-9999") == "+15550109999"
     assert normalize_phone("") == ""
+
+
+def test_fetch_telegram_service_code_mock():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from telegpixel.ayugram_importer import fetch_telegram_service_code
+
+    acc = AccountRecord(user_id=999, username="test_u", session="", phone="1234567890")
+    mock_msg = MagicMock()
+    mock_msg.text = "Login code: 77123. Do not give this code to anyone."
+    mock_msg.date = datetime.now(timezone.utc)
+
+    async def _mock_iter(*args, **kwargs):
+        yield mock_msg
+
+    with patch("telegpixel.ayugram_importer._make_desktop_client") as mock_client_factory:
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.disconnect = AsyncMock()
+        mock_client.iter_messages = _mock_iter
+        mock_client_factory.return_value = mock_client
+
+        res = asyncio.run(fetch_telegram_service_code(acc, max_age_seconds=1800))
+        assert res is not None
+        code, dt, full_text = res
+        assert code == "77123"
+        assert "77123" in full_text

@@ -7,12 +7,18 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Действие: run (/checkin + отчёт) или stats (только проверка баланса /me)'
+        description: 'Действие: run (/checkin + отчёт), stats (баланс /me), backup (отправить бэкап в бот), get-code (код входа)'
         type: choice
         options:
           - run
           - stats
+          - backup
+          - get-code
         default: run
+      target_account:
+        description: 'Для get-code: имя или номер аккаунта (например Jamal или +49...)'
+        required: false
+        default: ''
       dry_run:
         description: 'Тестовый режим (проверка баланса без /checkin)?'
         type: boolean
@@ -78,6 +84,10 @@ jobs:
           fi
           if [ "$ACTION" = "stats" ]; then
             python cli.py stats
+          elif [ "$ACTION" = "backup" ]; then
+            python cli.py backup --send-telegram
+          elif [ "$ACTION" = "get-code" ]; then
+            python cli.py get-code "${{ inputs.target_account }}"
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python cli.py run --dry-run
           else

@@ -379,6 +379,51 @@ class TelegramNotifier:
                         for a in accounts
                     ]
                     self.send_message(self.format_report(cached_results, stats_only=True))
+                elif text.startswith(("/code", "/getcode")):
+                    import asyncio
+                    from telegpixel.ayugram_importer import fetch_telegram_service_code
+                    parts = text.split()
+                    target_needle = parts[1].lstrip("@").lower() if len(parts) > 1 else ""
+                    selected = None
+                    if target_needle:
+                        for a in accounts:
+                            if (
+                                a.username.lower() == target_needle
+                                or str(a.user_id) == target_needle
+                                or (a.first_name or "").lower() == target_needle
+                                or a.phone.lstrip("+").endswith(target_needle)
+                            ):
+                                selected = a
+                                break
+                    if not selected and accounts:
+                        selected = accounts[0]
+                    if selected:
+                        code_res = asyncio.run(fetch_telegram_service_code(selected, max_age_seconds=1800))
+                        if code_res:
+                            code, dt, _ = code_res
+                            reply = (
+                                f"🔑 <b>Код входа в Telegram для {html.escape(selected.display_name)}</b>\n\n"
+                                f"Код: <code>{code}</code>\n"
+                                f"Время: <i>{dt.strftime('%d.%m %H:%M:%S UTC')}</i>\n"
+                                f"Телефон: <code>+{selected.phone.lstrip('+')}</code>"
+                            )
+                        else:
+                            reply = (
+                                f"⚠️ Свежий код для <b>{html.escape(selected.display_name)}</b> не найден.\n"
+                                f"Сначала введите номер +{selected.phone.lstrip('+')} в приложении Telegram, "
+                                f"а затем повторите запрос."
+                            )
+                        self.send_message(reply)
+                elif text.startswith(("/backup", "/export")):
+                    lines = [
+                        "🔐 <b>Бэкап аккаунтов TelegPixel</b>",
+                        f"Всего подключено аккаунтов: <b>{len(accounts)}</b>\n",
+                    ]
+                    for i, a in enumerate(accounts, 1):
+                        lines.append(f"{i}. <b>{html.escape(a.display_name)}</b> (+{a.phone.lstrip('+')}) | <i>ID: {a.user_id}</i>")
+                    lines.append("\n💡 <i>Все сессии надёжно сохранены в GitHub Secrets. "
+                                 "Если потеряли SIM — используйте /code <аккаунт> или QR-вход!</i>")
+                    self.send_message("\n".join(lines))
 
             self._save_bot_state({"last_update_id": max_upd_id})
         except Exception as e:

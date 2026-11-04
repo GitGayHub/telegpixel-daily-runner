@@ -636,5 +636,119 @@ def cmd_sync_secrets(repo: Optional[str], trigger: bool) -> None:
         subprocess.run(["gh", "workflow", "run", "daily.yml", "--repo", target_repo], check=False)
 
 
+@cli.command("get-code")
+@click.argument("target", required=False, default=None)
+@click.option("--any-age", is_flag=True, help="Не ограничивать давность кода (показать последний найденный).")
+@click.option("--no-telegram", is_flag=True, help="Не отправлять код в Telegram-бот.")
+def cmd_get_code(target: Optional[str], any_age: bool, no_telegram: bool) -> None:
+    """Получить код входа в Telegram для аккаунта БЕЗ физической SIM-карты."""
+    import html
+    from telegpixel.ayugram_importer import fetch_telegram_service_code
+
+    mgr = AccountManager()
+    accounts = mgr.list_accounts(enabled_only=True)
+    if not accounts:
+        console.print("[red]Нет доступных аккаунтов.[/red]")
+        return
+
+    selected = None
+    if target:
+        needle = target.strip().lstrip("@").lower()
+        for a in accounts:
+            if (
+                a.username.lower() == needle
+                or str(a.user_id) == needle
+                or (a.first_name or "").lower() == needle
+                or a.phone.lstrip("+").endswith(needle)
+            ):
+                selected = a
+                break
+        if not selected:
+            console.print(f"[red]Аккаунт '{target}' не найден.[/red]")
+            return
+    else:
+        console.print("\n[bold cyan]Выберите аккаунт для получения кода входа:[/bold cyan]")
+        for i, a in enumerate(accounts, start=1):
+            console.print(f"  {i}. {a.display_name} ({a.first_name or '—'}, +{a.phone.lstrip('+')})")
+        choice = click.prompt("Номер аккаунта", type=int, default=1)
+        if 1 <= choice <= len(accounts):
+            selected = accounts[choice - 1]
+        else:
+            console.print("[red]Неверный выбор.[/red]")
+            return
+
+    console.print(f"[cyan]🔍 Подключение к {selected.display_name} (+{selected.phone.lstrip('+')}) и чтение кода из Telegram...[/cyan]")
+    max_age = 0 if any_age else 1800
+    res = asyncio.run(fetch_telegram_service_code(selected, max_age_seconds=max_age))
+    if res:
+        code, dt, full_msg = res
+        console.print(f"\n[bold green]🔑 Код подтверждения для {selected.display_name}: [bold yellow]{code}[/bold yellow] (от {dt.strftime('%H:%M:%S UTC')})[/bold green]")
+        if not no_telegram:
+            notifier = TelegramNotifier()
+            text = (
+                f"🔑 <b>Код входа в Telegram для {html.escape(selected.display_name)}</b>\n\n"
+                f"Код: <code>{code}</code>\n"
+                f"Время: <i>{dt.strftime('%d.%m %H:%M:%S UTC')}</i>\n"
+                f"Телефон: <code>+{selected.phone.lstrip('+')}</code>"
+            )
+            notifier.send_message(text)
+    else:
+        console.print(f"[yellow]⚠️ Свежих кодов для {selected.display_name} в чате Telegram не найдено (запросите вход в приложении).[/yellow]")
+
+
+@cli.command("qr-login")
+@click.argument("target")
+@click.argument("token_or_url")
+def cmd_qr_login(target: str, token_or_url: str) -> None:
+    """Мгновенно авторизовать Telegram Desktop по QR-ссылке (tg://login?token=...) без SIM-карты."""
+    from telegpixel.ayugram_importer import accept_qr_login_token
+
+    mgr = AccountManager()
+    accounts = mgr.list_accounts(enabled_only=True)
+    needle = target.strip().lstrip("@").lower()
+    selected = next(
+        (a for a in accounts if a.username.lower() == needle or (a.first_name or "").lower() == needle or str(a.user_id) == needle),
+        None,
+    )
+    if not selected:
+        console.print(f"[red]Аккаунт '{target}' не найден.[/red]")
+        return
+
+    console.print(f"[cyan]Подтверждение QR-входа для {selected.display_name}...[/cyan]")
+    try:
+        ok = asyncio.run(accept_qr_login_token(selected, token_or_url))
+        if ok:
+            console.print(f"[bold green]✅ Новое устройство успешно авторизовано в аккаунте {selected.display_name}![/bold green]")
+        else:
+            console.print("[red]❌ Не удалось подтвердить QR-токен.[/red]")
+    except Exception as e:
+        console.print(f"[red]❌ Ошибка QR-входа: {e}[/red]")
+
+
+@cli.command("backup")
+@click.option("--send-telegram", is_flag=True, help="Отправить файл бэкапа и сводку в Telegram-бот.")
+def cmd_backup(send_telegram: bool) -> None:
+    """Создать локальный бэкап всех аккаунтов и сессий."""
+    import html
+    mgr = AccountManager()
+    accounts = mgr.list_accounts(enabled_only=True)
+    export_data = mgr.export_secret_json()
+    out_file = PROJECT_ROOT / "data" / "accounts_backup.json"
+    out_file.write_text(export_data, encoding="utf-8")
+    console.print(f"[bold green]✅ Бэкап всех {len(accounts)} аккаунтов сохранён в {out_file}[/bold green]")
+
+    if send_telegram:
+        notifier = TelegramNotifier()
+        lines = [
+            "🔐 <b>Бэкап аккаунтов и сессий TelegPixel</b>",
+            f"Всего подключено аккаунтов: <b>{len(accounts)}</b>\n",
+        ]
+        for i, a in enumerate(accounts, 1):
+            lines.append(f"{i}. <b>{html.escape(a.display_name)}</b> (+{a.phone.lstrip('+')})")
+        lines.append("\n💡 <i>Сессии надёжно сохранены в GitHub Secrets и зашифрованном кэше.</i>")
+        lines.append("<i>При потере SIM-карты запустите /code <аккаунт> или используйте QR-вход.</i>")
+        notifier.send_message("\n".join(lines))
+
+
 if __name__ == "__main__":
     cli()
