@@ -69,8 +69,9 @@ class TelegramNotifier:
         ).strip()
         self.tz_name = tz_name or os.getenv("APP_TIMEZONE", "Europe/Berlin")
         self.state_file = state_file or DEFAULT_BOT_STATE_FILE
-        self.verify_cost = int(os.getenv("VERIFY_COST_COINS", "30"))
-        self.pixel_cost = int(os.getenv("PIXEL_COST_COINS", "50"))
+        self.verify_cost = int(os.getenv("VERIFY_COST_COINS", "25"))
+        self.pixel_cost = int(os.getenv("PIXEL_COST_COINS", "25"))
+        self.target_bot = (os.getenv("TARGET_BOT_USERNAME") or "sheeridverifier_bot").strip().lstrip("@")
 
         try:
             self.tz = ZoneInfo(self.tz_name)
@@ -164,7 +165,8 @@ class TelegramNotifier:
 
         lines: List[str] = [
             title,
-            f"<i>{now_str}</i>\n",
+            f"<i>{now_str}</i>",
+            f"🤖 Бот: @{self.target_bot} — <a href=\"https://t.me/{self.target_bot}\">Быстрый переход ↗️</a>\n",
             f"👥 Всего аккаунтов: <b>{total_accs}</b>",
         ]
 
@@ -198,11 +200,11 @@ class TelegramNotifier:
             bal_str = f"<b>{bal} {_coin_word_ru(bal)}</b>" if bal is not None else "<b>? монет</b>"
             usd_str = f" (${usd:.2f})" if usd is not None else ""
 
-            # Milestone badge (/pixel = 50, /verify = 30)
+            # Milestone badge (/pixel = 25 coins)
             goal_badge = ""
             if bal is not None:
                 if bal >= self.pixel_cost:
-                    goal_badge = " 🎯<i>(хватает на /pixel!)</i>"
+                    goal_badge = f" 🎯<i>(хватает на /pixel и /verify!)</i>"
                 elif bal >= self.verify_cost:
                     goal_badge = " 🔹<i>(хватает на /verify)</i>"
 
@@ -225,6 +227,9 @@ class TelegramNotifier:
         lines.append(
             f"🏦 <b>Общий баланс:</b> <b>{total_coins} {_coin_word_ru(total_coins)}</b> (${total_usd:.2f}){earned_suffix}"
         )
+        lines.append(
+            f"💎 <b>Пиксель вериф (/pixel):</b> стоит <b>{self.pixel_cost} {_coin_word_ru(self.pixel_cost)}</b> (${self.pixel_cost * 0.04:.2f})"
+        )
 
         if sorted_results and sorted_results[0].balance is not None:
             top = sorted_results[0]
@@ -240,10 +245,9 @@ class TelegramNotifier:
             )
 
         ready_pixel_cnt = sum(1 for r in results if (r.balance or 0) >= self.pixel_cost)
-        ready_verify_cnt = sum(1 for r in results if (r.balance or 0) >= self.verify_cost)
-        if ready_pixel_cnt > 0 or ready_verify_cnt > 0:
+        if ready_pixel_cnt > 0:
             lines.append(
-                f"🎁 <b>Доступно услуг:</b> /pixel ({self.pixel_cost}+): <b>{ready_pixel_cnt}</b> акк. | /verify ({self.verify_cost}+): <b>{ready_verify_cnt}</b> акк."
+                f"🎁 <b>Готовы к верифу ({self.pixel_cost}+ монет):</b> <b>{ready_pixel_cnt}</b> акк."
             )
 
         lines.append("━━━━━━━━━━━━━━━━━━━")
@@ -474,7 +478,7 @@ class TelegramNotifier:
                             "💡 <b>Как применить на ПК:</b>\n"
                             "1. Скачайте и распакуйте архив.\n"
                             "2. Запустите <code>RESTORE_TO_AYUGRAM.bat</code> — все аккаунты появятся в вашем AyuGram автоматически!\n"
-                            + (f"\n🔑 Пароль архива: <code>{html.escape(pwd)}</code>" if pwd else "\n🔓 Без пароля (личная доставка в чат).")
+                            + (f"\n🔑 Пароль архива: подсказка <code>{html.escape(pwd[:2])}</code>" if pwd else "\n🔓 Без пароля (личная доставка в чат).")
                         )
                         self.send_document(archive_path, caption=caption)
                     except Exception as ex:

@@ -79,6 +79,9 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID || '2040' }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH || 'b18441a1ff607e10a989891a5462e627' }}
           TARGET_BOT_USERNAME: ${{ secrets.TARGET_BOT_USERNAME || 'sheeridverifier_bot' }}
+          REFERRAL_START_PARAM: ${{ secrets.REFERRAL_START_PARAM || 'REF5326338543' }}
+          PIXEL_COST_COINS: '25'
+          VERIFY_COST_COINS: '25'
           APP_TIMEZONE: Europe/Berlin
         run: |
           mkdir -p data
@@ -94,7 +97,7 @@ jobs:
           elif [ "$ACTION" = "get-code" ]; then
             python cli.py get-code "${{ inputs.target_account }}"
           elif [ "$ACTION" = "export-tdata" ]; then
-            PASS="${{ inputs.password || secrets.TELEGPIXEL_DEFAULT_2FA || 'ugIYgdGdiD8au0' }}"
+            PASS="${{ inputs.password || secrets.TELEGPIXEL_DEFAULT_2FA }}"
             python cli.py export-tdata --password "$PASS" --send-telegram
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             python cli.py run --dry-run

@@ -103,6 +103,9 @@ def _auto_sync_github_if_possible(mgr: AccountManager) -> None:
     if chat_id:
         secrets_map["TELEGPIXEL_CHAT_ID"] = chat_id
         secrets_map["TELEGRAM_CHAT_ID"] = chat_id
+    default_2fa = (os.getenv("TELEGPIXEL_DEFAULT_2FA") or "").strip()
+    if default_2fa:
+        secrets_map["TELEGPIXEL_DEFAULT_2FA"] = default_2fa
 
     try:
         outcomes = sync_secrets_to_github(secrets_map, repo=repo)
@@ -624,6 +627,9 @@ def cmd_sync_secrets(repo: Optional[str], trigger: bool) -> None:
     if chat_id:
         secrets_map["TELEGPIXEL_CHAT_ID"] = chat_id
         secrets_map["TELEGRAM_CHAT_ID"] = chat_id
+    default_2fa = (os.getenv("TELEGPIXEL_DEFAULT_2FA") or "").strip()
+    if default_2fa:
+        secrets_map["TELEGPIXEL_DEFAULT_2FA"] = default_2fa
 
     target_repo = repo or detect_github_repo()
     outcomes = sync_secrets_to_github(secrets_map, repo=target_repo)
@@ -763,7 +769,7 @@ def cmd_export_tdata(output_path: str, password: Optional[str], send_telegram: b
             "💡 <b>Как применить на ПК:</b>\n"
             "1. Распакуйте архив.\n"
             "2. Запустите <code>RESTORE_TO_AYUGRAM.bat</code> — все аккаунты сразу откроются в AyuGram!\n"
-            + (f"\n🔑 Пароль архива: <code>{html.escape(password)}</code>" if password else "\n🔓 Без пароля (личная доставка).")
+            + (f"\n🔑 Пароль архива: подсказка <code>{html.escape(password[:2])}</code>" if password else "\n🔓 Без пароля (личная доставка).")
         )
         ok = notifier.send_document(res_path, caption=caption)
         if ok:

@@ -151,7 +151,30 @@ def test_account_manager_and_report_formatting(tmp_path: Path):
     assert "30 монет" in report
     assert "28 монет" in report
     assert "58 монет" in report
-    assert "хватает на /verify" in report
+    assert "хватает на /pixel" in report
+    assert "25 монет" in report
+    assert "https://t.me/sheeridverifier_bot" in report
+
+
+def test_referral_init_for_new_account():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from telegpixel.runner import CheckinRunner
+
+    runner = CheckinRunner()
+    acc = AccountRecord(user_id=999999, username="new_acc", session="dummy")
+
+    assert runner._get_start_command(acc) == "/start REF5326338543"
+    # Referrer account itself should just use /start
+    owner_acc = AccountRecord(user_id=5326338543, username="ChickenJ0ckey", session="dummy")
+    assert runner._get_start_command(owner_acc) == "/start"
+
+    mock_client = MagicMock()
+    mock_client.get_messages = AsyncMock(return_value=[])
+    runner._send_and_wait_message = AsyncMock(return_value=("Welcome!", None))
+
+    asyncio.run(runner._ensure_bot_initialized_with_referral(mock_client, "bot_ent", acc))
+    runner._send_and_wait_message.assert_called_once_with(mock_client, "bot_ent", "/start REF5326338543")
 
 
 def test_smart_notify_throttling(tmp_path: Path):

@@ -32,6 +32,7 @@ logger = logging.getLogger("telegpixel.runner")
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 DEFAULT_TARGET_BOT = "sheeridverifier_bot"
+DEFAULT_REFERRAL_PARAM = "REF5326338543"
 DESKTOP_DEVICE_MODEL = "Desktop"
 DESKTOP_SYSTEM_VERSION = "Windows 10"
 DESKTOP_APP_VERSION = "5.8.3 x64"
@@ -65,8 +66,44 @@ class CheckinRunner:
         self.target_bot = (
             target_bot or os.getenv("TARGET_BOT_USERNAME") or DEFAULT_TARGET_BOT
         ).strip().lstrip("@")
+        self.referral_param = (
+            os.getenv("REFERRAL_START_PARAM") or DEFAULT_REFERRAL_PARAM
+        ).strip()
         self.reply_timeout = reply_timeout
         self.inter_account_delay = inter_account_delay
+
+    def _get_start_command(self, account: AccountRecord) -> str:
+        """Return '/start REF5326338543' for referral accounts, or '/start' for the referrer itself."""
+        if self.referral_param and str(account.user_id) not in self.referral_param:
+            return f"/start {self.referral_param}"
+        return "/start"
+
+    async def _ensure_bot_initialized_with_referral(
+        self,
+        client: TelegramClient,
+        bot_entity: object,
+        account: AccountRecord,
+    ) -> None:
+        """If the account has never interacted with the target bot before, activate via referral link first."""
+        try:
+            existing_msgs = await client.get_messages(bot_entity, limit=1)
+        except Exception:
+            existing_msgs = []
+
+        if existing_msgs:
+            return
+
+        start_cmd = self._get_start_command(account)
+        logger.info(
+            f"[{account.display_name}] Аккаунт ещё не заходил в @{self.target_bot} — "
+            f"активация по реферальной ссылке: https://t.me/{self.target_bot}?start={self.referral_param}"
+        )
+        start_reply, start_msg = await self._send_and_wait_message(client, bot_entity, start_cmd)
+        if self._is_join_gate_message(start_reply, start_msg) and start_msg is not None:
+            logger.info(f"[{account.display_name}] Подписка на обязательные каналы для засчитывания реферала...")
+            await self._satisfy_join_gate(client, start_msg, account.display_name)
+            await self._send_and_wait_message(client, bot_entity, start_cmd)
+        await asyncio.sleep(1.2)
 
     async def _send_and_wait_message(
         self,
@@ -202,6 +239,7 @@ class CheckinRunner:
 
             await asyncio.sleep(1.2)
             bot_entity = await client.get_entity(self.target_bot)
+            await self._ensure_bot_initialized_with_referral(client, bot_entity, account)
 
             if dry_run or stats_only:
                 reply, msg_obj = await self._send_and_wait_message(client, bot_entity, "/me")
@@ -209,7 +247,7 @@ class CheckinRunner:
                     await self._satisfy_join_gate(client, msg_obj, account.display_name)
                     reply, _ = await self._send_and_wait_message(client, bot_entity, "/me")
                 if not reply:
-                    reply = await self._send_and_wait_reply(client, bot_entity, "/start")
+                    reply = await self._send_and_wait_reply(client, bot_entity, self._get_start_command(account))
                 parsed = parse_profile_reply(reply)
                 if parsed.balance is not None:
                     account.balance = parsed.balance
@@ -251,9 +289,13 @@ class CheckinRunner:
                 reply = await self._send_and_wait_reply(client, bot_entity, "/checkin")
                 parsed = parse_checkin_reply(reply)
             elif parsed.status == CheckinStatus.FAILED and "обслуживании" not in (parsed.error_reason or ""):
-                # If the account never started the bot before, send /start once and retry /checkin
-                logger.info(f"[{account.display_name}] Initializing bot via /start and retrying /checkin...")
-                await self._send_and_wait_reply(client, bot_entity, "/start")
+                # If the account never started the bot before, send /start REF5326338543 once and retry /checkin
+                start_cmd = self._get_start_command(account)
+                logger.info(f"[{account.display_name}] Initializing bot via {start_cmd} and retrying /checkin...")
+                start_reply, start_msg = await self._send_and_wait_message(client, bot_entity, start_cmd)
+                if self._is_join_gate_message(start_reply, start_msg) and start_msg is not None:
+                    await self._satisfy_join_gate(client, start_msg, account.display_name)
+                    await self._send_and_wait_message(client, bot_entity, start_cmd)
                 await asyncio.sleep(1.5)
                 reply = await self._send_and_wait_reply(client, bot_entity, "/checkin")
                 parsed = parse_checkin_reply(reply)
@@ -265,7 +307,7 @@ class CheckinRunner:
                 await asyncio.sleep(1.0)
                 me_reply = await self._send_and_wait_reply(client, bot_entity, "/me")
                 if not me_reply:
-                    me_reply = await self._send_and_wait_reply(client, bot_entity, "/start")
+                    me_reply = await self._send_and_wait_reply(client, bot_entity, self._get_start_command(account))
                 bal, usd, streak = extract_balance_info(me_reply)
                 if bal is not None:
                     parsed.balance = bal
